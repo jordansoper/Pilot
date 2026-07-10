@@ -290,18 +290,38 @@ export PATH="$JAVA_HOME/bin:$ANDROID_HOME/platform-tools:$PATH"
 pnpm install                         # root .npmrc pins node-linker=hoisted (see below)
 pnpm --filter @pilot/shared build
 
-# Debug-signed APK (auto-signed with the debug keystore; works on any dev
-# device with "Install from unknown sources" enabled). This script runs
-# prebuild, applies the monorepo patches, then Gradle — no manual steps:
+# RELEASE APK — the sideload target. JS is bundled INTO the apk, so it runs
+# standalone with no Metro server. Signed with the debug keystore by default
+# (Expo template: buildTypes.release.signingConfig = signingConfigs.debug), so
+# it installs on any device with "Install from unknown sources" — no keystore
+# setup needed until you ship to Play. This is what you want on your phone:
+pnpm --filter @pilot/app build:android:local:release
+# Output: packages/app/android/app/build/outputs/apk/release/app-release.apk
+
+# DEBUG APK — for the dev inner loop only. It does NOT embed the JS; it fetches
+# the bundle from a Metro dev server at launch. Installing it and opening it
+# with no reachable Metro throws the red screen:
+#   "Unable to load script. Make sure you're either running Metro ... or that
+#    your bundle 'index.android.bundle' is packaged correctly for release."
+# To use a debug build: run `pnpm --filter @pilot/app start` and either be on
+# the same LAN or `adb reverse tcp:8081 tcp:8081` over USB.
 pnpm --filter @pilot/app build:android:local:debug
 # Output: packages/app/android/app/build/outputs/apk/debug/app-debug.apk
 
-# Release APK (signed with release keystore — generate one with
+# For a real production keystore (when shipping to Play), generate one with
 # `keytool -genkeypair -keystore pilot-release.keystore -alias pilot \
-#     -keyalg RSA -keysize 2048 -validity 10000` and add it to
-# packages/app/android/gradle.properties before running):
-pnpm --filter @pilot/app build:android:local:release
+#   -keyalg RSA -keysize 2048 -validity 10000`, wire it into
+# packages/app/android/gradle.properties, and point release signingConfig at it.
 ```
+
+> **Standalone bundling depends on two committed pieces** (both needed for the
+> release bundle to build under pnpm): `packages/app/index.js` as the entry
+> point (`main` in the app's package.json — replaces `expo/AppEntry`, whose
+> `../../App` import breaks when pnpm puts expo in `.pnpm/`), and the
+> `resolveRequest` shim in `metro.config.js` that maps the codebase's
+> `.js`-suffixed relative imports (a `moduleResolution: "Bundler"` convention)
+> onto their real `.ts`/`.tsx` files. Without them the bundler fails with
+> `Unable to resolve module ../../App` or `...MachinesScreen.js`.
 
 **Install to a phone** (USB debugging on, or `adb connect <ip>` over the
 tailnet):
