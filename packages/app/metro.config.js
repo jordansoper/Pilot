@@ -26,4 +26,24 @@ config.resolver.nodeModulesPaths = [
 // 2. Make sure Metro picks up the sibling `packages/*` directories.
 config.resolver.disableHierarchicalLookup = true;
 
+// 3. The codebase uses `moduleResolution: "Bundler"` + `verbatimModuleSyntax`,
+//    so relative imports carry explicit `.js` extensions that actually point
+//    at `.ts`/`.tsx` sources (e.g. `./screens/MachinesScreen.js` → .tsx).
+//    TypeScript understands this; Metro does not — it would look for a literal
+//    `.js` file and fail. Rewrite relative `*.js` specifiers to their real
+//    source by retrying extension-less resolution first, falling back to the
+//    original name (so genuine `.js` files still resolve).
+const defaultResolveRequest = config.resolver.resolveRequest;
+config.resolver.resolveRequest = (context, moduleName, platform) => {
+  const resolve = defaultResolveRequest ?? context.resolveRequest;
+  if (moduleName.startsWith('.') && moduleName.endsWith('.js')) {
+    try {
+      return resolve(context, moduleName.slice(0, -'.js'.length), platform);
+    } catch {
+      // Fall through to resolving the name as written.
+    }
+  }
+  return resolve(context, moduleName, platform);
+};
+
 module.exports = config;
