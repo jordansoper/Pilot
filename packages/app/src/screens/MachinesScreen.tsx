@@ -15,6 +15,7 @@ import { HealthResponseSchema } from '@pilot/shared';
 export interface MachinesScreenProps {
   onAddMachine: () => void;
   onOpenTerminal: (machineId: string) => void;
+  onOpenSettings: () => void;
 }
 
 type Status = 'unknown' | 'checking' | 'online' | 'offline';
@@ -44,7 +45,11 @@ async function pingOne(machine: PairedMachine): Promise<Status> {
   }
 }
 
-export function MachinesScreen({ onAddMachine, onOpenTerminal }: MachinesScreenProps) {
+export function MachinesScreen({
+  onAddMachine,
+  onOpenTerminal,
+  onOpenSettings,
+}: MachinesScreenProps) {
   const [machines, setMachines] = useState<PairedMachine[]>([]);
   const [status, setStatus] = useState<Record<string, Status>>({});
   const [refreshing, setRefreshing] = useState(false);
@@ -97,9 +102,14 @@ export function MachinesScreen({ onAddMachine, onOpenTerminal }: MachinesScreenP
     <View style={styles.root}>
       <View style={styles.header}>
         <Text style={styles.h1}>Machines</Text>
-        <TouchableOpacity style={styles.addBtn} onPress={onAddMachine}>
-          <Text style={styles.addBtnText}>+ Pair</Text>
-        </TouchableOpacity>
+        <View style={styles.headerActions}>
+          <TouchableOpacity style={styles.iconBtn} onPress={onOpenSettings} hitSlop={8}>
+            <Text style={styles.iconBtnText}>⚙</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.addBtn} onPress={onAddMachine}>
+            <Text style={styles.addBtnText}>+ Pair</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {machines.length === 0 ? (
@@ -175,6 +185,9 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   h1: { color: '#fff', fontSize: 22, fontWeight: '600' },
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  iconBtn: { padding: 8 },
+  iconBtnText: { color: '#9ca3af', fontSize: 20 },
   addBtn: {
     backgroundColor: '#0ea5e9',
     paddingVertical: 8,

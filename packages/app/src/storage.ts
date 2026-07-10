@@ -33,9 +33,10 @@ export async function listMachines(): Promise<PairedMachine[]> {
 export async function upsertMachine(machine: PairedMachine): Promise<void> {
   const machines = await listMachines();
   const i = machines.findIndex((m) => m.id === machineId(machine.host, machine.port));
-  const next = i >= 0
-    ? machines.map((m, idx) => (idx === i ? { ...m, ...machine } : m))
-    : [...machines, machine];
+  const next =
+    i >= 0
+      ? machines.map((m, idx) => (idx === i ? { ...m, ...machine } : m))
+      : [...machines, machine];
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 }
 
@@ -45,15 +46,19 @@ export async function removeMachine(id: string): Promise<void> {
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 }
 
-export async function setLastSeen(
-  id: string,
-  lastSeenMs: number | null,
-): Promise<void> {
+/**
+ * Wipe all Pilot-stored data (paired machines, and any future keys). Used by
+ * the Settings "Reset app" action to return to a clean slate — handy when a
+ * pairing is stuck with a stale token.
+ */
+export async function resetApp(): Promise<void> {
+  await AsyncStorage.multiRemove([STORAGE_KEY]);
+}
+
+export async function setLastSeen(id: string, lastSeenMs: number | null): Promise<void> {
   const machines = await listMachines();
   const i = machines.findIndex((m) => m.id === id);
   if (i < 0) return;
-  const next = machines.map((m, idx) =>
-    idx === i ? { ...m, lastSeenMs } : m,
-  );
+  const next = machines.map((m, idx) => (idx === i ? { ...m, lastSeenMs } : m));
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 }

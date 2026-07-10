@@ -43,4 +43,5 @@ export { type PairingPayload };
 export type Screen =
   | { name: 'machines' }
   | { name: 'addMachine' }
+  | { name: 'settings' }
   | { name: 'terminal'; machineId: string };

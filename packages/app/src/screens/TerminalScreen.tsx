@@ -1,11 +1,5 @@
 import { useEffect, useState } from 'react';
-import {
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import { StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import { listMachines } from '../storage.js';
 import type { PairedMachine } from '../types.js';
@@ -238,7 +232,9 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
           source={{ html, baseUrl: BASE_URL }}
           onMessage={onMessage}
           // Block navigation away from our inline page.
-          onShouldStartLoadWithRequest={(req) => req.url.startsWith(BASE_URL) || req.url === 'about:blank'}
+          onShouldStartLoadWithRequest={(req) =>
+            req.url.startsWith(BASE_URL) || req.url === 'about:blank'
+          }
           mixedContentMode="always"
           javaScriptCanOpenWindowsAutomatically={false}
           // Remount on machine change or cwd change so the IIFE re-reads the

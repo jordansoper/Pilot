@@ -1,12 +1,7 @@
 import { useCallback, useState } from 'react';
-import {
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
+import { StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { QrScanner } from '../components/QrScanner.js';
+import { TopBar } from '../components/TopBar.js';
 import { decodePairingUrl } from '../pairing-decoder.js';
 import { fromPairingPayload } from '../types.js';
 import { upsertMachine } from '../storage.js';
@@ -60,18 +55,14 @@ export function AddMachineScreen({ onDone, onCancel }: AddMachineScreenProps) {
 
   return (
     <View style={styles.root}>
+      <TopBar title="Pair a machine" onBack={onCancel} />
       <View style={styles.scannerBox}>
-        <QrScanner
-          onScanned={handleScanned}
-          onError={(e) => setError(e)}
-        />
+        <QrScanner onScanned={handleScanned} onError={(e) => setError(e)} />
       </View>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
-      <Text style={styles.help}>
-        Or paste a pilot://pair URL:
-      </Text>
+      <Text style={styles.help}>Or paste a pilot://pair URL:</Text>
       <TextInput
         style={styles.input}
         value={manual}

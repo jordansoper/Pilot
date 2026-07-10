@@ -4,8 +4,7 @@ import { PairingPayloadSchema, PAIRING_SCHEME, type PairingPayload } from '@pilo
  * Result of attempting to decode a scanned QR string.
  */
 export type DecodeResult =
-  | { ok: true; payload: PairingPayload }
-  | { ok: false; error: string };
+  { ok: true; payload: PairingPayload } | { ok: false; error: string };
 
 /**
  * Decode a scanned QR string into a validated {@link PairingPayload}.
@@ -85,7 +84,7 @@ function base64UrlDecodeToString(input: string): string {
 
   // bytes -> UTF-8 string (handles multibyte + surrogate pairs)
   let out = '';
-  for (let i = 0; i < bytes.length; ) {
+  for (let i = 0; i < bytes.length;) {
     const b0 = bytes[i++]!;
     if (b0 < 0x80) {
       out += String.fromCharCode(b0);

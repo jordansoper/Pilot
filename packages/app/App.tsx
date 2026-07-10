@@ -1,46 +1,69 @@
 import { StatusBar } from 'expo-status-bar';
 import {
+  BackHandler,
   Platform,
   SafeAreaView,
   StatusBar as RNStatusBar,
   StyleSheet,
 } from 'react-native';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import type { Screen } from './src/types.js';
 import { MachinesScreen } from './src/screens/MachinesScreen.js';
 import { AddMachineScreen } from './src/screens/AddMachineScreen.js';
+import { SettingsScreen } from './src/screens/SettingsScreen.js';
 import { TerminalScreen } from './src/screens/TerminalScreen.js';
 
+const HOME: Screen = { name: 'machines' };
+
 /**
- * pilot-app — Phase 1 root.
+ * pilot-app root.
  *
- * Hand-rolled 3-screen navigator. State-based switch beats `react-navigation`
- * for a 3-screen flow with no deep nesting, and tucks a future Phase 2 file
- * picker in as another branch on the same `Screen` union.
+ * Hand-rolled navigation stack (an array of screens). A stack — rather than a
+ * single current-screen — gives real "back" behaviour: a visible back button
+ * and the Android hardware back button both pop to the previous screen, and
+ * only exit the app from the home screen. Still lighter than react-navigation
+ * for this handful of screens.
  */
 export default function App() {
-  const [screen, setScreen] = useState<Screen>({ name: 'machines' });
+  const [stack, setStack] = useState<Screen[]>([HOME]);
+  const current = stack[stack.length - 1] ?? HOME;
 
-  const goMachines = useCallback(() => setScreen({ name: 'machines' }), []);
-  const goAdd = useCallback(() => setScreen({ name: 'addMachine' }), []);
-  const goTerminal = useCallback(
-    (machineId: string) => setScreen({ name: 'terminal', machineId }),
-    [],
-  );
+  const push = useCallback((screen: Screen) => setStack((s) => [...s, screen]), []);
+  const back = useCallback(() => {
+    setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
+  }, []);
+  const goHome = useCallback(() => setStack([HOME]), []);
+
+  // Android hardware back: pop the stack; only let the OS exit from home.
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (stack.length > 1) {
+        back();
+        return true;
+      }
+      return false;
+    });
+    return () => sub.remove();
+  }, [stack.length, back]);
 
   return (
     <SafeAreaView style={styles.root}>
       {/* Dark app background → light status-bar icons so the clock/battery
           stay visible. */}
       <StatusBar style="light" />
-      {screen.name === 'machines' && (
-        <MachinesScreen onAddMachine={goAdd} onOpenTerminal={goTerminal} />
+      {current.name === 'machines' && (
+        <MachinesScreen
+          onAddMachine={() => push({ name: 'addMachine' })}
+          onOpenTerminal={(machineId) => push({ name: 'terminal', machineId })}
+          onOpenSettings={() => push({ name: 'settings' })}
+        />
       )}
-      {screen.name === 'addMachine' && (
-        <AddMachineScreen onDone={goMachines} onCancel={goMachines} />
+      {current.name === 'addMachine' && (
+        <AddMachineScreen onDone={back} onCancel={back} />
       )}
-      {screen.name === 'terminal' && (
-        <TerminalScreen machineId={screen.machineId} onBack={goMachines} />
+      {current.name === 'settings' && <SettingsScreen onBack={back} onReset={goHome} />}
+      {current.name === 'terminal' && (
+        <TerminalScreen machineId={current.machineId} onBack={back} />
       )}
     </SafeAreaView>
   );

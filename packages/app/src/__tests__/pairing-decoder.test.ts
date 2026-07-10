@@ -43,7 +43,10 @@ describe('decodePairingUrl', () => {
 
   it('accepts scheme without scheme prefix (defensive)', () => {
     const payload = buildPairingPayload({
-      host: '100.64.0.2', port: 7117, token: validToken, name: 'mbp',
+      host: '100.64.0.2',
+      port: 7117,
+      token: validToken,
+      name: 'mbp',
     });
     const url = buildPairingUrl(payload);
     // Strip the `pilot://` prefix; the decoder should accept `pair?...`.

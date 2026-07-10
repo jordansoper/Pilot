@@ -1,10 +1,5 @@
 import { useCallback, useRef, useState } from 'react';
-import {
-  Button,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { Button, StyleSheet, Text, View } from 'react-native';
 import {
   CameraView,
   useCameraPermissions,
@@ -81,9 +76,7 @@ export function QrScanner({ onScanned, onError }: QrScannerProps) {
       <View pointerEvents="none" style={styles.overlay}>
         <View style={styles.frame} />
       </View>
-      {throttledNote ? (
-        <Text style={styles.throttle}>(re-scan ignored)</Text>
-      ) : null}
+      {throttledNote ? <Text style={styles.throttle}>(re-scan ignored)</Text> : null}
     </View>
   );
 }
