@@ -1,16 +1,8 @@
 import fs from 'node:fs';
 import process from 'node:process';
 import type { Duplex } from 'node:stream';
-import {
-  createServer,
-  type IncomingMessage,
-  type ServerResponse,
-} from 'node:http';
-import {
-  WebSocketServer,
-  type RawData,
-  type WebSocket,
-} from 'ws';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import type { IPty } from 'node-pty';
 import {
   HEALTH_PATH,
@@ -23,6 +15,7 @@ import {
 } from '@pilot/shared';
 import { checkBearer } from './auth.js';
 import { getLauncher } from './launchers.js';
+import { buildPairingPageHtml } from './pairing-page.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -40,6 +33,14 @@ export interface ServerOptions {
   bind: string;
   /** Resolved Tailscale IPv4, or null if not on a tailnet. */
   tailscaleIp: string | null;
+  /**
+   * `pilot://pair?…` URL. When set, the daemon serves a loopback-only HTML
+   * pairing page (crisp QR) at `GET /` — a cleaner alternative to the terminal
+   * ASCII QR. Never served to non-loopback clients (the QR carries the token).
+   */
+  pairingUrl?: string;
+  /** Friendly machine name, shown on the pairing page. */
+  machineName?: string;
 }
 
 export interface RunningServer {
@@ -66,8 +67,13 @@ function rawToBuffer(data: RawData): Buffer {
  */
 export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   let actualPort = opts.port;
+  // Pre-render the loopback pairing page once (the pairing URL is fixed for
+  // the daemon's lifetime), so request handling stays synchronous.
+  const pairingPageHtml = opts.pairingUrl
+    ? await buildPairingPageHtml(opts.pairingUrl, opts)
+    : null;
   const httpServer = createServer((req, res) => {
-    handleHttp(req, res, opts, actualPort);
+    handleHttp(req, res, opts, actualPort, pairingPageHtml);
   });
 
   const wss = new WebSocketServer({
@@ -141,17 +147,38 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+/** True for connections originating on this machine (loopback). */
+function isLoopback(req: IncomingMessage): boolean {
+  const a = req.socket.remoteAddress ?? '';
+  return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
+}
+
 function handleHttp(
   req: IncomingMessage,
   res: ServerResponse,
   opts: ServerOptions,
   actualPort: number,
+  pairingPageHtml: string | null,
 ): void {
+  const url = new URL(req.url ?? '/', `http://${opts.bind}:${actualPort}`);
+
+  // Loopback-only pairing page. Served BEFORE auth (it has no token) but only
+  // to localhost, because the QR embeds the bearer token — exposing it to the
+  // tailnet would defeat pairing. Non-loopback callers get a plain 404.
+  if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/pair')) {
+    if (pairingPageHtml && isLoopback(req)) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(pairingPageHtml);
+    } else {
+      sendJson(res, 404, { error: 'not found' });
+    }
+    return;
+  }
+
   if (!checkBearer(req, opts.token)) {
     send401(res);
     return;
   }
-  const url = new URL(req.url ?? '/', `http://${opts.bind}:${actualPort}`);
 
   if (req.method !== 'GET') {
     sendJson(res, 405, { error: 'method not allowed' });
@@ -199,9 +226,7 @@ function handleUpgrade(
     socket.destroy();
     return;
   }
-  const parsed = PtyHelloQuerySchema.safeParse(
-    Object.fromEntries(url.searchParams),
-  );
+  const parsed = PtyHelloQuerySchema.safeParse(Object.fromEntries(url.searchParams));
   if (!parsed.success) {
     socket.write(
       'HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n' +
@@ -267,10 +292,7 @@ function handlePtyConnection(ws: WebSocket, req: IncomingMessage): void {
 
   let term: IPty;
   try {
-    term = launcher.spawn(
-      { cwd: hello.cwd, cols: hello.cols, rows: hello.rows },
-      hello,
-    );
+    term = launcher.spawn({ cwd: hello.cwd, cols: hello.cols, rows: hello.rows }, hello);
   } catch (err) {
     try {
       ws.send(
@@ -296,10 +318,7 @@ function handlePtyConnection(ws: WebSocket, req: IncomingMessage): void {
   // Settle-once flag so the "client closed → process exits → onExit sends
   // JSON after ws.close" path can't throw and crash the daemon.
   let closed = false;
-  const finishFromProcess = (payload: {
-    exitCode: number;
-    signal: number | null;
-  }) => {
+  const finishFromProcess = (payload: { exitCode: number; signal: number | null }) => {
     if (closed) return;
     closed = true;
     try {

@@ -27,9 +27,14 @@ export interface TokenResult {
  * `rotate: true` to force a new token (and re-pair) on purpose.
  *
  * The file is written 0600 (owner-only); the token is a bearer credential.
+ *
+ * `path` overrides the default location (used by tests to avoid touching the
+ * real home directory).
  */
-export function loadOrCreateToken(opts: { rotate?: boolean } = {}): TokenResult {
-  const path = tokenFilePath();
+export function loadOrCreateToken(
+  opts: { rotate?: boolean; path?: string } = {},
+): TokenResult {
+  const path = opts.path ?? tokenFilePath();
 
   if (!opts.rotate) {
     try {

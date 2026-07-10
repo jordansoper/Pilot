@@ -141,8 +141,11 @@ async function main(): Promise<void> {
     port: args.port,
     bind: args.bind,
     tailscaleIp,
+    pairingUrl: url,
+    machineName: payload.name,
   });
   console.log(`HTTP server ready on http://${args.bind}:${server.port}`);
+  console.log(`Pairing page (scan a crisp QR here): http://localhost:${server.port}/`);
 
   let shuttingDown = false;
   const shutdown = async (signal: string) => {
