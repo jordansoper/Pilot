@@ -41,6 +41,16 @@ export default [
     },
   },
 
+  // Repo tooling scripts (Node globals)
+  {
+    files: ['scripts/**/*.{js,mjs}'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: { ...globals.node },
+    },
+  },
+
   // React Native / Expo (browser globals + JSX)
   {
     files: ['packages/app/**/*.{ts,tsx}'],

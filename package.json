@@ -10,6 +10,7 @@
   },
   "packageManager": "pnpm@9.12.0",
   "scripts": {
+    "postinstall": "node scripts/fix-node-pty-perms.mjs",
     "build": "pnpm -r --topological build",
     "dev:cli": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli dev",
     "dev:app": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/app start",

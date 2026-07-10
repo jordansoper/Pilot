@@ -21,7 +21,7 @@
 | API contract (REST + WS) | Zod schemas cover everything in `PROJECT_PLAN §8` |
 | CLI daemon (`pilot`) | Implements Phase 1 vertical slice: QR pairing, `/api/health`, `/ws/pty on bash` |
 | Android app (`pilot-app`) | Phase 1 three-screen flow: Machines → AddMachine → Terminal (xterm.js in WebView) |
-| Phase 1 acceptance | **Not yet green.** Code is in place; needs a real Tailscale + phone run-through. |
+| Phase 1 acceptance | **Partially green.** `pnpm --filter @pilot/cli smoke` passes on macOS (arm64) — the full `node-pty → WS → bash` round-trip works. Still needs a real Tailscale + phone run-through for the app half. See note below on the node-pty perms fix that unblocked the smoke. |
 | Phases 2–5 | **Not started.** See the plan section below. |
 
 ---
@@ -307,14 +307,36 @@ Each launcher is one new entry in `launchers.ts`:
 
 ---
 
+## Baseline established (2026-07-11)
+
+Ran the full sequence on macOS (arm64, Node 26.5, pnpm 9.12 via corepack):
+
+- `git init` + first commit — **done** (repo now has history).
+- `pnpm install` — **green**.
+- `pnpm typecheck && pnpm lint && pnpm test` — **all green** (39 unit tests).
+- `pnpm --filter @pilot/cli smoke` — **green** after fixing a real blocker
+  (below).
+
+**Blocker found and fixed — node-pty `spawn-helper` execute bit.** The smoke
+test initially failed with `0 chunks from PTY` on macOS. Root cause: pnpm's
+store dropped the `+x` bit on node-pty's prebuilt
+`prebuilds/darwin-arm64/spawn-helper`, so `pty.fork` failed with
+`posix_spawnp failed` and the shell never started. Fix: a root `postinstall`
+(`scripts/fix-node-pty-perms.mjs`) restores the bit on every install; verified
+it survives a fresh `pnpm install`. This is **not** the Windows/ConPTY issue —
+same symptom, different cause. Documented in TROUBLESHOOTING §3.
+
 ## Recommended *very next* actions
 
-1. `pnpm install && pnpm --filter @pilot/shared build`
-2. `pnpm --filter @pilot/cli smoke` on macOS/Linux — confirm green (or hit
-   the Windows + Git Bash known hang and switch dev boxes).
-3. `pnpm typecheck && pnpm lint && pnpm test` — baseline the gates.
-4. `git init` and commit the current state (after the `pnpm test` passes).
-5. Tackle **WS reconnect in WebView** as the cheapest pre-Phase-2 win.
+1. **Real-device Phase 1 acceptance** — the only thing left to call Phase 1
+   done: run `pnpm --filter @pilot/cli dev` on this Mac with Tailscale up,
+   scan the QR from the Android app, confirm the bash terminal round-trips on
+   the phone (TROUBLESHOOTING §1 checklist). Everything downstream assumes
+   this works; the smoke proves the CLI half, not the app half.
+2. Tackle **WS reconnect in WebView** as the cheapest pre-Phase-2 win.
+3. Then start **Phase 2** (file picker + `/api/fs` + `/api/tools`), and add
+   the `freebuff` launcher alongside `claude` in the same pass — freebuff is a
+   CLI tool, so it's a one-line launcher, no need to wait for Phase 4.
 
 Once those five are done, jump into **Step 2** above (Phase 2 file picker
 + Claude) — that's where the user-visible value lives next.
