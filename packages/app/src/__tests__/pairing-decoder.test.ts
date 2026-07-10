@@ -24,6 +24,23 @@ describe('decodePairingUrl', () => {
     expect(decoded.payload).toEqual(payload);
   });
 
+  it('round-trips a non-ASCII machine name (multibyte UTF-8 decode)', () => {
+    // Guards the hand-rolled base64url/UTF-8 decoder: the app can't rely on
+    // TextDecoder (missing in Hermes), so multibyte sequences must survive
+    // our own decode. Regression for "payload is not valid base64url JSON"
+    // on-device.
+    const payload = buildPairingPayload({
+      host: '100.64.0.2',
+      port: 7117,
+      token: validToken,
+      name: 'café-münchen-☕',
+    });
+    const decoded = decodePairingUrl(buildPairingUrl(payload));
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    expect(decoded.payload.name).toBe('café-münchen-☕');
+  });
+
   it('accepts scheme without scheme prefix (defensive)', () => {
     const payload = buildPairingPayload({
       host: '100.64.0.2', port: 7117, token: validToken, name: 'mbp',

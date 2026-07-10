@@ -53,18 +53,57 @@ export function decodePairingUrl(scanned: string): DecodeResult {
   return { ok: true, payload: parsed.data };
 }
 
+const BASE64_ALPHABET =
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
 /**
- * Decode a base64url string to a UTF-8 string. Works in Node (atob is
- * global) and React Native (0.74+ ships atob via Hermes/JSI).
- * Avoids `Buffer` because RN doesn't ship one unless we add a polyfill.
+ * Decode a base64url string to a UTF-8 string using only plain JS —
+ * no `atob`, `TextDecoder`, or `Buffer`. Hermes (React Native's engine)
+ * does not reliably ship those globals, and when `TextDecoder` is missing
+ * the whole decode throws at runtime (the QR looks "invalid" on-device even
+ * though the payload is fine). A hand-rolled decoder runs identically in
+ * Node (vitest) and on-device.
  */
 function base64UrlDecodeToString(input: string): string {
   const std = input.replace(/-/g, '+').replace(/_/g, '/');
-  const padded = std + '='.repeat((4 - (std.length % 4)) % 4);
-  // atob returns a binary string; we re-encode it as a Uint8Array and
-  // run it through TextDecoder so multibyte UTF-8 sequences survive.
-  const bin = atob(padded);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new TextDecoder('utf-8').decode(bytes);
+  const clean = std.replace(/=+$/, '');
+
+  // base64 -> bytes
+  const bytes: number[] = [];
+  let buffer = 0;
+  let bits = 0;
+  for (const ch of clean) {
+    const idx = BASE64_ALPHABET.indexOf(ch);
+    if (idx === -1) throw new Error(`invalid base64 character: ${ch}`);
+    buffer = (buffer << 6) | idx;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      bytes.push((buffer >> bits) & 0xff);
+    }
+  }
+
+  // bytes -> UTF-8 string (handles multibyte + surrogate pairs)
+  let out = '';
+  for (let i = 0; i < bytes.length; ) {
+    const b0 = bytes[i++]!;
+    if (b0 < 0x80) {
+      out += String.fromCharCode(b0);
+    } else if (b0 >= 0xc0 && b0 < 0xe0) {
+      out += String.fromCharCode(((b0 & 0x1f) << 6) | (bytes[i++]! & 0x3f));
+    } else if (b0 >= 0xe0 && b0 < 0xf0) {
+      out += String.fromCharCode(
+        ((b0 & 0x0f) << 12) | ((bytes[i++]! & 0x3f) << 6) | (bytes[i++]! & 0x3f),
+      );
+    } else {
+      const cp =
+        ((b0 & 0x07) << 18) |
+        ((bytes[i++]! & 0x3f) << 12) |
+        ((bytes[i++]! & 0x3f) << 6) |
+        (bytes[i++]! & 0x3f);
+      const c = cp - 0x10000;
+      out += String.fromCharCode(0xd800 + (c >> 10), 0xdc00 + (c & 0x3ff));
+    }
+  }
+  return out;
 }
