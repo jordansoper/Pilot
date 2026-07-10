@@ -1,0 +1,323 @@
+# Pilot — Troubleshooting & Manual Acceptance
+
+Runbook for **Phase 1** sign-off plus a backlog of known platform-specific
+issues we've already hit during development.
+
+> See [`PROJECT_PLAN.md`](./PROJECT_PLAN.md) for the architecture and
+> [`README.md`](./README.md) for the dev loop.
+
+---
+
+## 1. Phase 1 manual sign-off checklist
+
+These are the exact steps a contributor runs on their dev machine to
+declare Phase 1 done. Replace `~/src/pilot` with your clone path.
+
+```bash
+git clone <repo> ~/src/pilot
+cd ~/src/pilot
+
+pnpm install                              # ~30 s
+pnpm --filter @pilot/shared build         # builds dist/ for cli + app to import
+pnpm --filter @pilot/cli smoke            # in-process daemon + bash round-trip
+                                          # EXPECTED: "[smoke] PASS — bash echoed ...
+                                          #          and bad-auth was rejected"
+
+# On a Tailscale-attached machine, start the real daemon.
+pnpm --filter @pilot/cli -- pilot --port 7117
+
+# Scan the printed QR from a Tailscale-attached phone (or paste the URL
+# into the app's manual-entry box on the AddMachine screen).
+#  - Machines list should show the new row with an online dot
+#  - Tap → Terminal → cwd /tmp → confirm bash prompt renders
+#  - `echo hi` should round-trip back through xterm
+
+# To exercise the dev build on Android:
+pnpm --filter @pilot/app android
+```
+
+A run is GREEN when:
+
+- `pnpm install` completes without `node-pty` or `react-native-webview`
+  postinstall errors
+- `pnpm --filter @pilot/cli smoke` prints `PASS`
+- The app renders all three screens and the bash round-trip works
+- Long-pressing a machine removes it from the list
+
+Anything else is a bug — capture it below and file an issue.
+
+---
+
+## 2. Per-OS quick notes
+
+### macOS
+
+Happy path. `process.env.SHELL` resolves to `/bin/zsh` (or `/bin/bash`),
+`pnpm install` builds node-pty cleanly, the smoke `bash` PTY round-trips
+in under a second. Apple-Silicon cross-compilation works because
+node-pty 1.x ships prebuilt binaries for `darwin-arm64` and `darwin-x64`.
+
+If `pnpm install` complains about Xcode CLI tools:
+
+```bash
+xcode-select --install
+```
+
+### Linux
+
+Happy path on most distros. node-pty 1.x ships Linux prebuilds for
+`x64` and `arm64` glibc. If you're on Alpine / musl: install `build-base`
++ `python3` and let node-pty compile from source.
+
+### Windows
+
+The Phase 1 daemon runs on Windows but has two real pitfalls. See §3
+below for the Git Bash friction. Quick rough edges:
+
+- `pnpm install` requires **Visual Studio Build Tools** (C++ workload)
+  for `node-pty` to compile if no Windows prebuild is found.
+- Android `usesCleartextTraffic` is already on (see `packages/app/app.json`)
+  so Tailscale IP fetches work.
+- The `usesCleartextTraffic=true` only enables `http://` to RFC1918/loopback
+  Tailscale IPs (100.x); do NOT use it for production endpoints.
+
+---
+
+## 3. Known issues
+
+| Symptom | OS / env | Cause | Workaround |
+|---|---|---|---|
+| `pnpm --filter @pilot/cli smoke` reports `0 chunks from PTY` | Windows + Git Bash | `bash -l` sources shell init files via ConPTY; bash.exe in Git Bash doesn't emit anything back through ConPTY in this build within 60 s | Use macOS/Linux for the dev box; or use `cmd.exe`/PowerShell Phase 2 launchers; or set `PILOT_NO_LOGIN=1` if you add that env knob later |
+| `bash: command not found` when smoke runs | Windows | `bash` not on PATH (Git Bash ships it inside the install dir) | Add `<Git>\usr\bin` to PATH, or `pnpm install` inside Git Bash itself |
+| Expo bundler fails on Metro cache mismatch after dependency change | any | Stale `.expo` cache | `pnpm --filter @pilot/app clean && rm -rf .expo && pnpm --filter @pilot/app android` |
+| App shows "Offline" even though daemon is up | any | Wrong host (proxied/Docker hairpin) or token drift after restart | Tap-and-hold the row to remove; re-pair from a fresh QR |
+| QR scanned but app says "payload rejected" | any | Pilot CLI version drift on the daemon side | Confirm `@pilot/shared` is the same version on both machines |
+| App shows the machine, but tapping it shows "closed (1006)" right after the session opens | any | CLI was restarted after pairing — a fresh `crypto.randomBytes(32)` token invalidates any saved pairing | Re-pair from a new QR, or wait for Phase 5 to ship `PILOT_PIN_TOKEN` support so the daemon reads a stable token from disk |
+
+### Windows + Git Bash + ConPTY (deep dive)
+
+Repro path observed during development:
+
+```
+$ pnpm --filter @pilot/cli smoke
+[smoke] listening on 127.0.0.1:55897
+[smoke] /api/health OK: { version: '0.0.0', uptimeMs: 272, tailscaleIp: null, port: 55897 }
+[smoke] FAIL — marker not seen after 60s — captured 0 chars (0 chunks) from PTY
+```
+
+What we learned:
+
+- The HTTP+WS handshake works (server is bound, /api/health returns,
+  WS upgrade passes auth, `bash` is invoked via `pty.spawn('bash',
+  ['-l'], …)` without throwing).
+- `term.onData(…)` never fires in 60 s. Either ConPTY on this Windows
+  build never pipes bash's stdout back to the WS server, or `bash -l`
+  is stuck sourcing init files for >60 s in this env.
+
+What works:
+
+- `/api/health`, `/ws/pty` upgrade, and WS auth (verified in the smoke).
+- `bash -l` on macOS / Linux (verified by the same smoke at the top of
+  the file).
+
+Recommended next steps to make Windows work:
+
+1. Add Phase 2 launchers `cmd` and `powershell` so Windows users have
+   plainer options until Git Bash on ConPTY catches up.
+2. Make the bash launcher's `-l` flag configurable per-launch (env var
+   `PILOT_NO_LOGIN=1`) so smoke / Windows users can opt out of the login
+   splash.
+3. If neither works, document "Windows bash-via-ConPTY is currently
+   flaky; use WSL or a Mac/Linux dev box" in the README.
+
+---
+
+## 4. Daemonization (Phase 5 preview)
+
+Phase 5 will add `pilot install` to register the daemon with the OS.
+Below are the equivalents right now, in case you want Phase 1 to start
+on login before `pilot install` lands.
+
+### macOS — LaunchAgent (`~/Library/LaunchAgents/com.pilot.cli.plist`)
+
+Build the CLI first (`pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build`) so the daemon runs from the compiled `dist/`, not `tsx` watch mode:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.pilot.cli</string>
+  <key>WorkingDirectory</key><string>/Users/YOU/src/pilot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/share/pnpm/pnpm</string>
+    <string>--filter</string><string>@pilot/cli</string>
+    <string>start</string>
+    <string>--</string>
+    <string>--no-qr</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict>
+    <key>SuccessfulExit</key><false/>
+    <key>Crashed</key><true/>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/pilot-cli.log</string>
+  <key>StandardErrorPath</key><string>/tmp/pilot-cli.err</string>
+</dict>
+</plist>
+```
+
+Find your pnpm path with `which pnpm` and substitute in `ProgramArguments`.
+Load: `launchctl load -w ~/Library/LaunchAgents/com.pilot.cli.plist`.
+Important: a LaunchAgent that starts before Tailscale is up will print a
+`tailscaleIp: null` QR — the daemon restarts when Tailscale comes up
+only if `KeepAlive` is `true`.
+
+### Linux — systemd user unit (`~/.config/systemd/user/pilot-cli.service`)
+
+Run the BUILT CLI from inside the workspace (build first with
+`pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build`):
+
+```ini
+[Unit]
+Description=Pilot CLI daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/src/pilot
+ExecStart=%h/.local/share/pnpm/node_modules/@pilot/cli/dist/index.js --port 7117 --no-qr
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+After install: `systemctl --user daemon-reload && systemctl --user enable --now pilot-cli`.
+Finding the exact `dist/index.js` path: `ls $(pnpm root)/@pilot/cli/dist/`.
+
+### Windows — Scheduled Task (PowerShell)
+
+Wrap the daemon in a tiny batch file so the task can keep it alive
+(use `start` not `start:dev`, and don't run `cmd /c` — it exits as soon
+as the inner command returns, killing the daemon). Save this as
+`%USERPROFILE%\bin\pilot-daemon.bat`:
+
+```bat
+@echo off
+cd /d "%USERPROFILE%\src\pilot"
+"%USERPROFILE%\.local\bin\pnpm.cmd" --filter @pilot/cli start -- --no-qr
+```
+
+Then register the task:
+
+```powershell
+$action = New-ScheduledTaskAction `
+  -Execute "$env:USERPROFILE\bin\pilot-daemon.bat" `
+  -WorkingDirectory "$env:USERPROFILE\src\pilot"
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$trigger = New-ScheduledTaskTrigger -AtLogOn
+Register-ScheduledTask `
+  -TaskName 'PilotCli' `
+  -Action $action `
+  -Trigger $trigger `
+  -Settings $settings `
+  -Description 'Pilot CLI daemon (Phase 5 will replace this with pilot install)'
+```
+
+(W11 built-in Tailscale runs at logon so the daemon can announce its
+tailnet IP right away. W7/8/10: install Tailscale and set it as a
+logon startup item first.)
+
+---
+
+## 5. Building an installable Android APK
+
+Two paths produce a sideloadable APK. The cloud (EAS) one requires only
+an Expo account; the local one requires Android Studio + JDK 17 on the
+build host.
+
+### A. EAS Build (recommended — no JDK needed)
+
+```bash
+# One-time:
+npm install -g eas-cli
+eas login                                  # uses your free Expo account
+
+# From the repo root, after a fresh install:
+pnpm install
+pnpm --filter @pilot/shared build
+
+# Internal-distribution APK (sideload target):
+pnpm --filter @pilot/app build:android:preview
+
+# Play Store AAB (when ready to ship):
+pnpm --filter @pilot/app build:android:production
+```
+
+EAS free tier: 30 builds / month on the Android queue. Profile
+`preview` produces `app-release.apk` (internal distribution), `production`
+produces an `.aab` for the Play Console.
+
+When the build completes, `eas build:list` shows the artifact URL.
+Install on a phone:
+
+```bash
+# Easiest: scan the QR Expo prints in the terminal
+# OR: download the .apk and:
+adb install app-release.apk
+```
+
+### B. Local Gradle (requires JDK 17 + Android SDK)
+
+```bash
+# Install: Android Studio (which gives you adb, sdkmanager, gradle)
+# Plus JDK 17 (the Android Gradle Plugin 8.x is happiest on 17).
+export ANDROID_HOME="$HOME/Library/Android/sdk"   # macOS default
+export PATH="$PATH:$ANDROID_HOME/platform-tools"
+
+pnpm install
+pnpm --filter @pilot/shared build
+
+# Generate the native android/ project (committing it is optional):
+pnpm --filter @pilot/app prebuild:android
+
+# Debug-signed APK (auto-signed with the debug keystore; works on
+# any dev device with "Install from unknown sources" enabled):
+pnpm --filter @pilot/app build:android:local:debug
+# Output: packages/app/android/app/build/outputs/apk/debug/app-debug.apk
+
+# Release APK (signed with release keystore — generate one with
+# `keytool -genkeypair -keystore pilot-release.keystore -alias pilot \
+#     -keyalg RSA -keysize 2048 -validity 10000` and add it to
+# packages/app/android/gradle.properties before running):
+pnpm --filter @pilot/app build:android:local:release
+```
+
+Caveat for cross-device debug-keystore installs: the debug keystore is
+per-developer / per-machine. If you build a debug APK on machine A and
+try to install it on a phone that already has a build from machine B,
+Android will reject it as a signature mismatch. Use `adb uninstall
+com.pilot.app` first, OR stick to the release-keystore path.
+
+---
+
+## 6. Reporting issues
+
+When you hit something that's not on this page, paste the relevant bits
+into an issue. Useful fields:
+
+- **OS**: `uname -a` (Mac/Linux) or `ver` (Windows).
+- **Tailscale version**: `tailscale version`.
+- **`@pilot/shared` version**: `pnpm --filter @pilot/shared list`.
+- **CLI command**: `pilot --port 7117 --no-qr` (omit QR if photo-shared).
+- **App command**: `pnpm --filter @pilot/app android` (with `EXPO_DEBUG=1`
+  if it's a Metro bundling issue).
+- **Smoke output**: paste the full `pnpm --filter @pilot/cli smoke`
+  output, including the `[smoke] chunk #N` lines if any show up.
+- **What you expected**: e.g. "bash prompt renders in <1 s".
+- **What you saw**: paste, photo, or screen recording.

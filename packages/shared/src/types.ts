@@ -1,0 +1,18 @@
+import type { z } from 'zod';
+import type {
+  PairingPayloadSchema,
+  FsEntrySchema,
+  FsResponseSchema,
+  ToolInfoSchema,
+  ToolsResponseSchema,
+  HealthResponseSchema,
+  PtyHelloQuerySchema,
+} from './schemas.js';
+
+export type PairingPayload = z.infer<typeof PairingPayloadSchema>;
+export type FsEntry = z.infer<typeof FsEntrySchema>;
+export type FsResponse = z.infer<typeof FsResponseSchema>;
+export type ToolInfo = z.infer<typeof ToolInfoSchema>;
+export type ToolsResponse = z.infer<typeof ToolsResponseSchema>;
+export type HealthResponse = z.infer<typeof HealthResponseSchema>;
+export type PtyHelloQuery = z.infer<typeof PtyHelloQuerySchema>;

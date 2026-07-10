@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+.expo/
+.expo-shared/
+
+# Logs
+*.log
+.npm
+.eslintcache
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Test coverage
+coverage/
+
+# Generated lockfiles (keep root pnpm-lock.yaml)
+**/pnpm-lock.yaml

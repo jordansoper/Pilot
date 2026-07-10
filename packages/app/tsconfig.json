@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "jsx": "react-native",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"],
+    "noEmit": true,
+    "allowJs": true,
+    "types": ["react"]
+  },
+  "include": ["App.tsx", "src/**/*", "app.json"],
+  "references": [{ "path": "../shared" }]
+}
