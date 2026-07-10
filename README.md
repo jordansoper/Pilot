@@ -13,6 +13,7 @@ This is a **pnpm** monorepo with three packages:
 | [`packages/shared`](./packages/shared) | Zod schemas + TS types shared by cli and app. The single source of truth for the REST/WS contract. |
 | [`packages/cli`](./packages/cli) | `pilot-cli` — daemon that runs on the dev machine. Bun/Node + TypeScript. |
 | [`packages/app`](./packages/app) | `pilot-app` — React Native + Expo, Android-first. |
+| [`packages/desktop`](./packages/desktop) | `pilot-desktop` — **Phase 6 scaffold.** Electron app that launches the daemon and shows the pairing QR in a window. Run: `pnpm --filter @pilot/desktop start`. Not yet self-contained (uses system `node`) or signed. |
 
 ## Quick start
 

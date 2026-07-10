@@ -51,6 +51,19 @@ export default [
     },
   },
 
+  // Desktop Electron main process (CommonJS, Node globals)
+  {
+    files: ['packages/desktop/**/*.cjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'commonjs',
+      globals: { ...globals.node },
+    },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
+
   // React Native / Expo (browser globals + JSX)
   {
     files: ['packages/app/**/*.{ts,tsx}'],

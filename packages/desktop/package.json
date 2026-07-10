@@ -1,0 +1,14 @@
+{
+  "name": "@pilot/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pilot desktop app (Phase 6 scaffold) — launches the daemon and shows the pairing QR in a window. See PROJECT_PLAN §9 Phase 6.",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && electron .",
+    "clean": "echo 'nothing to clean'"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}
