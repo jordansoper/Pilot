@@ -20,13 +20,15 @@ export interface MachinesScreenProps {
 type Status = 'unknown' | 'checking' | 'online' | 'offline';
 
 /**
- * Pings /api/health with a 2s timeout and reports status. The timeout is
- * generous-enough for Tailscale hairpin; tighter times produce spurious
- * `offline`s during the daemon's startup banner.
+ * Pings /api/health and reports status. The 6s timeout is deliberately
+ * generous: the phone's Tailscale tunnel to a peer often has to wake from
+ * idle (sometimes via a DERP relay) on the first request, which can take
+ * several seconds. A tight timeout flashes a spurious `offline` on the first
+ * tap even though the machine is reachable.
  */
 async function pingOne(machine: PairedMachine): Promise<Status> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 2_000);
+  const timeout = setTimeout(() => controller.abort(), 6_000);
   try {
     const res = await fetch(`http://${machine.host}:${machine.port}/api/health`, {
       headers: { authorization: `Bearer ${machine.token}` },
@@ -42,10 +44,7 @@ async function pingOne(machine: PairedMachine): Promise<Status> {
   }
 }
 
-export function MachinesScreen({
-  onAddMachine,
-  onOpenTerminal,
-}: MachinesScreenProps) {
+export function MachinesScreen({ onAddMachine, onOpenTerminal }: MachinesScreenProps) {
   const [machines, setMachines] = useState<PairedMachine[]>([]);
   const [status, setStatus] = useState<Record<string, Status>>({});
   const [refreshing, setRefreshing] = useState(false);
@@ -107,9 +106,8 @@ export function MachinesScreen({
         <View style={styles.empty}>
           <Text style={styles.emptyTitle}>No machines yet</Text>
           <Text style={styles.emptyBody}>
-            Run{' '}
-            <Text style={styles.code}>pilot</Text>
-            {' '}on your dev machine, then tap "+ Pair" to scan its QR.
+            Run <Text style={styles.code}>pilot</Text> on your dev machine, then tap "+
+            Pair" to scan its QR.
           </Text>
         </View>
       ) : (

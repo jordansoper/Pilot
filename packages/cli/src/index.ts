@@ -9,27 +9,23 @@
  * See PROJECT_PLAN.md §Phase 1 for what this does and doesn't yet do.
  */
 import { hostname } from 'node:os';
-import { randomBytes } from 'node:crypto';
 import {
   DEFAULT_BIND,
   DEFAULT_PORT,
   PROTOCOL_VERSION,
   SHARED_PACKAGE_VERSION,
-  TOKEN_BYTES,
 } from '@pilot/shared';
-import {
-  buildPairingPayload,
-  buildPairingUrl,
-  renderPairingQr,
-} from './pairing.js';
+import { buildPairingPayload, buildPairingUrl, renderPairingQr } from './pairing.js';
 import { startServer } from './server.js';
 import { getTailscaleIp } from './tailscale.js';
+import { loadOrCreateToken } from './token.js';
 
 interface CliArgs {
   port: number;
   bind: string;
   name: string;
   noQr: boolean;
+  rotateToken: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -38,6 +34,7 @@ function parseArgs(argv: string[]): CliArgs {
     bind: DEFAULT_BIND,
     name: hostname(),
     noQr: false,
+    rotateToken: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -63,6 +60,9 @@ function parseArgs(argv: string[]): CliArgs {
       case '--no-qr':
         args.noQr = true;
         break;
+      case '--rotate-token':
+        args.rotateToken = true;
+        break;
       case '-h':
       case '--help':
         printHelp();
@@ -87,14 +87,24 @@ Flags:
   --bind, -b <ip>  IP to bind to (default ${DEFAULT_BIND})
   --name, -n <s>   Friendly machine name in the QR (default: hostname)
   --no-qr          Print pairing URL but skip the ASCII QR (for headless)
+  --rotate-token   Generate a fresh token (invalidates existing pairings)
   -h, --help       Print this help
+
+The pairing token is persisted to ~/.pilot/token so a paired phone keeps
+working across restarts. Use --rotate-token to revoke and re-pair.
 `,
   );
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const token = randomBytes(TOKEN_BYTES).toString('hex');
+  const {
+    token,
+    path: tokenPath,
+    created,
+  } = loadOrCreateToken({
+    rotate: args.rotateToken,
+  });
   const tailscaleIp = await getTailscaleIp();
 
   // The pairing payload MUST use a Tailscale-routable host. If we couldn't
@@ -108,8 +118,11 @@ async function main(): Promise<void> {
   });
   const url = buildPairingUrl(payload);
 
+  console.log(`pilot-cli v${SHARED_PACKAGE_VERSION} (protocol v${PROTOCOL_VERSION})`);
   console.log(
-    `pilot-cli v${SHARED_PACKAGE_VERSION} (protocol v${PROTOCOL_VERSION})`,
+    created
+      ? `Token: new token written to ${tokenPath} — pair once; it persists across restarts.`
+      : `Token: reusing ${tokenPath} — existing pairings still valid (use --rotate-token to revoke).`,
   );
   if (tailscaleIp) {
     console.log(
@@ -144,7 +157,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
-  const message = err instanceof Error ? err.stack ?? err.message : String(err);
+  const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
   console.error('fatal:', message);
   process.exit(1);
 });
