@@ -169,6 +169,7 @@ checklist until vitest+RN-Testing-Library or component tests are added.
 | 5 | IME height handling + Ctrl/Alt toolbar in WebView | `TerminalScreen.tsx` + companion RN component |
 | 5 | xterm WebLinksAddon | small template HTML edit |
 | 5 | Crash logs to disk on CLI side | new file |
+| 6 | Desktop app (macOS + Windows): launchable GUI wrapping the daemon — tray/menu-bar lifecycle, pairing-QR window, settings (port/name/bind-to-Tailscale-IP), folder-access GUI for the FS allowlist, tool toggles, run-at-login | new `packages/desktop/` (Electron; reuses `startServer()` from `@pilot/cli` + `@pilot/shared` schemas). See PROJECT_PLAN §9 Phase 6 |
 | Backlog | Windows + Git Bash + ConPTY workarounds | `PILOT_NO_LOGIN` env knob, or Phase 2 `cmd`/`powershell` launchers (see TROUBLESHOOTING §3) |
 
 ---

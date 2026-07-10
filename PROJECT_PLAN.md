@@ -175,6 +175,63 @@ This phase exists to kill the Bun+node-pty risk in isolation.
 - Tabs / multiple simultaneous sessions in app.
 - Crash logs to disk on CLI side.
 
+### Phase 6 — Desktop app (macOS + Windows, Linux best-effort)
+
+**Goal:** a double-click, launchable desktop app that wraps `pilot-cli` so a
+non-technical user never touches a terminal. It runs the daemon in the
+background, lives in the menu bar / system tray, and gives a real UI for the
+things you currently do with flags and env vars: pairing QR, settings, and
+folder access. The CLI stays the source of truth for the wire protocol; the
+desktop app is a front-end that manages a daemon, not a reimplementation.
+
+**Why this is its own phase:** it's a new deliverable (a third client after
+`cli` and `app`), it introduces desktop packaging/code-signing/notarization
+work, and it should only start once the daemon's surface (Phases 2–4: `/api/fs`
+allowlist, `/api/tools`, launchers) is stable enough to expose in a GUI.
+
+**Scope (v1 of the desktop app):**
+- **Launch & lifecycle.** Menu-bar (macOS) / system-tray (Windows) icon with
+  Start/Stop, "run at login" toggle, and a status line (running/stopped,
+  Tailscale up/down, N connected clients). Supersedes Phase 5's OS-level
+  daemonization for interactive desktops; the CLI `--install` path stays for
+  headless/Linux servers.
+- **Pairing QR window.** Render the `pilot://pair` QR in a real window (not
+  ASCII), with a "copy pair URL" button and a "regenerate token / re-pair"
+  action. Shows which machine name + Tailscale IP it's advertising.
+- **Settings.** Port, machine name, and **which interface to bind** — default
+  to the discovered Tailscale IP (this is where the loopback-vs-Tailscale bind
+  footgun gets solved with a sane default and an explanation, not a flag).
+- **Folder access.** A GUI for the FS allowlist (Phase 2's `$HOME` /
+  `PILOT_FS_ROOT`): add/remove allowed root folders via a native folder
+  picker, so the phone can only browse what the user has granted. Closes the
+  §11 "Filesystem scope" open question for the desktop case.
+- **Tool toggles.** Enable/disable launchers (bash / claude / freebuff /
+  ollama) and show which were auto-detected as installed.
+
+**Tech decision — Electron (primary), Tauri (noted alternative).** The daemon
+is already Node + native `node-pty`, so an Electron main process can import and
+run the existing `startServer()` from `@pilot/cli` in-process and reuse the
+`@pilot/shared` zod schemas and even React components. Tauri would give much
+smaller binaries but forces the daemon to run as a spawned Node sidecar and
+adds a Rust toolchain — revisit only if bundle size becomes a real complaint.
+Lands as a new `packages/desktop/` in the monorepo.
+
+**Risks specific to this phase:**
+- **Code-signing & notarization.** macOS Gatekeeper needs a Developer ID +
+  notarization; Windows needs an Authenticode cert or users hit SmartScreen.
+  This is paperwork + CI work, not code — budget for it.
+- **Bundling `node-pty`.** The native module must be packaged per-arch
+  (electron-builder + the same prebuild/spawn-helper care as the CLI — see the
+  `spawn-helper` execute-bit issue in TROUBLESHOOTING §3).
+- **Two things that manage a daemon.** Make sure the desktop app and a manually
+  run `pilot-cli` don't fight over port 7117 — detect and surface a conflict
+  rather than crashing with `EADDRINUSE`.
+
+**Definition of done:** on a clean Mac and a clean Windows box, install the
+signed app, launch it from the Applications list / Start menu, toggle "run at
+login", open the QR window, add an allowed folder, and pair + drive a `bash`
+session from the phone — all without opening a terminal.
+
 ## 10. Risks (top 3)
 
 1. **`node-pty` native compilation across Win/Mac/Linux from Bun** — historically flaky. **Mitigation:** prove Phase 1 on all 3 OSes on day 1. If Bun-side fails, fall back to `@lydell/node-pty-prebuilt-multiarch` or ship Node 20 LTS instead. The whole project hinges on this so we don't move on to Phase 2 until it works everywhere.
