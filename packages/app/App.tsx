@@ -1,5 +1,10 @@
 import { StatusBar } from 'expo-status-bar';
-import { SafeAreaView, StyleSheet } from 'react-native';
+import {
+  Platform,
+  SafeAreaView,
+  StatusBar as RNStatusBar,
+  StyleSheet,
+} from 'react-native';
 import { useCallback, useState } from 'react';
 import type { Screen } from './src/types.js';
 import { MachinesScreen } from './src/screens/MachinesScreen.js';
@@ -25,7 +30,9 @@ export default function App() {
 
   return (
     <SafeAreaView style={styles.root}>
-      <StatusBar style="dark" />
+      {/* Dark app background → light status-bar icons so the clock/battery
+          stay visible. */}
+      <StatusBar style="light" />
       {screen.name === 'machines' && (
         <MachinesScreen onAddMachine={goAdd} onOpenTerminal={goTerminal} />
       )}
@@ -33,10 +40,7 @@ export default function App() {
         <AddMachineScreen onDone={goMachines} onCancel={goMachines} />
       )}
       {screen.name === 'terminal' && (
-        <TerminalScreen
-          machineId={screen.machineId}
-          onBack={goMachines}
-        />
+        <TerminalScreen machineId={screen.machineId} onBack={goMachines} />
       )}
     </SafeAreaView>
   );
@@ -46,5 +50,9 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: '#0f1115',
+    // `SafeAreaView` from react-native only insets on iOS; on Android it is a
+    // plain View, so content would render under the status bar (buttons behind
+    // the clock/battery). Pad by the real status-bar height on Android.
+    paddingTop: Platform.OS === 'android' ? (RNStatusBar.currentHeight ?? 0) : 0,
   },
 });

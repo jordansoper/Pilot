@@ -184,6 +184,17 @@ things you currently do with flags and env vars: pairing QR, settings, and
 folder access. The CLI stays the source of truth for the wire protocol; the
 desktop app is a front-end that manages a daemon, not a reimplementation.
 
+**Hard requirement — fully self-contained, zero external dependencies.** The
+end user installs *one* app and nothing else. No system Node, no pnpm, no repo
+checkout, no `corepack`, no terminal step (installing pnpm-via-corepack, the
+`--bind 0.0.0.0` flag, `start:dev` vs `dev` — every rough edge from getting the
+daemon running by hand goes away). The app **bundles its own Node runtime and
+the `node-pty` native module** (this is the main reason Electron is chosen over
+a spawn-a-system-node design) and ships as a single signed installer per OS:
+`.dmg`/`.pkg` (macOS), `.exe`/MSI (Windows), AppImage/`.deb` (Linux
+best-effort). Tailscale remains the one external prerequisite (it's the
+transport); everything else Pilot needs travels inside the app bundle.
+
 **Why this is its own phase:** it's a new deliverable (a third client after
 `cli` and `app`), it introduces desktop packaging/code-signing/notarization
 work, and it should only start once the daemon's surface (Phases 2–4: `/api/fs`
@@ -207,6 +218,10 @@ allowlist, `/api/tools`, launchers) is stable enough to expose in a GUI.
   §11 "Filesystem scope" open question for the desktop case.
 - **Tool toggles.** Enable/disable launchers (bash / claude / freebuff /
   ollama) and show which were auto-detected as installed.
+- **Self-contained packaging.** One installer per OS with the Node runtime and
+  `node-pty` prebuilt inside; installs to Applications / Start menu; first
+  launch works on a machine that has never had Node or pnpm. No repo, no
+  build step for the end user.
 
 **Tech decision — Electron (primary), Tauri (noted alternative).** The daemon
 is already Node + native `node-pty`, so an Electron main process can import and
@@ -227,10 +242,12 @@ Lands as a new `packages/desktop/` in the monorepo.
   run `pilot-cli` don't fight over port 7117 — detect and surface a conflict
   rather than crashing with `EADDRINUSE`.
 
-**Definition of done:** on a clean Mac and a clean Windows box, install the
-signed app, launch it from the Applications list / Start menu, toggle "run at
+**Definition of done:** on a clean Mac and a clean Windows box **with no Node,
+pnpm, or repo checkout present**, install the signed app from a single
+installer, launch it from the Applications list / Start menu, toggle "run at
 login", open the QR window, add an allowed folder, and pair + drive a `bash`
-session from the phone — all without opening a terminal.
+session from the phone — all without opening a terminal or installing anything
+besides Tailscale.
 
 ## 10. Risks (top 3)
 

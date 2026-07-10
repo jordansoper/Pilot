@@ -56,4 +56,4 @@ Phase 2).
 - ⏳ Phase 3 — Multi-machine
 - ⏳ Phase 4 — Freebuff + Ollama launchers
 - ⏳ Phase 5 — Daemonization & polish
-- ⏳ Phase 6 — Desktop app (macOS + Windows): launchable GUI wrapping the daemon — pairing QR, settings, folder-access config, run-at-login
+- ⏳ Phase 6 — Desktop app (macOS + Windows): fully self-contained, single-installer GUI (bundles its own Node + node-pty, no system deps) wrapping the daemon — pairing QR, settings, folder-access config, run-at-login
