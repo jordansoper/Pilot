@@ -21,10 +21,7 @@ export interface RenderPairingQrOptions {
  * Print a QR code encoding the given pairing URL. Uses `qrcode-terminal`'s
  * ASCII renderer so no PNG dependency is needed in Phase 1.
  */
-export function renderPairingQr(
-  url: string,
-  options: RenderPairingQrOptions = {},
-): void {
+export function renderPairingQr(url: string, options: RenderPairingQrOptions = {}): void {
   if (options.label) console.log(options.label);
   if (options.silent) {
     console.log(`Pair URL: ${url}`);

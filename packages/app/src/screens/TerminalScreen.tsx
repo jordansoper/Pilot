@@ -203,7 +203,9 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
   }
 
   const html = renderHtml({
-    host: machine.host,
+    // Prefer the address that answered the health check (LAN when on the same
+    // Wi-Fi), falling back to the first candidate.
+    host: machine.lastGoodHost ?? machine.hosts[0] ?? machine.host,
     port: String(machine.port),
     token: machine.token,
     cwd,

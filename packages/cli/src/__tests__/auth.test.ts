@@ -43,10 +43,7 @@ describe('checkBearer', () => {
 
   it('honours multi-value Authorization header (RFC 7235)', () => {
     expect(
-      checkBearer(
-        makeReq({ authorization: `Negotiate x, Bearer ${TOKEN}` }),
-        TOKEN,
-      ),
+      checkBearer(makeReq({ authorization: `Negotiate x, Bearer ${TOKEN}` }), TOKEN),
     ).toBe(true);
   });
 });

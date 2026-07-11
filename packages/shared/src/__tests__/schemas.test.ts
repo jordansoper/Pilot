@@ -8,6 +8,7 @@ import {
   HealthResponseSchema,
   PtyHelloQuerySchema,
   buildPairingPayload,
+  buildPairingUrl,
 } from '../schemas.js';
 import { PROTOCOL_VERSION } from '../constants.js';
 
@@ -23,6 +24,33 @@ describe('PairingPayloadSchema', () => {
       name: 'workstation-b',
     });
     expect(parsed.name).toBe('workstation-b');
+  });
+
+  it('accepts a multi-host payload and round-trips hosts through the URL', () => {
+    const payload = buildPairingPayload({
+      host: '100.64.0.2',
+      hosts: ['100.64.0.2', '192.168.1.20'],
+      port: 7117,
+      token: validToken,
+      name: 'mbp',
+    });
+    expect(payload.hosts).toEqual(['100.64.0.2', '192.168.1.20']);
+    // hosts survives the base64url URL encoding the QR carries.
+    const url = buildPairingUrl(payload);
+    const p = url.split('p=')[1]!.replace(/-/g, '+').replace(/_/g, '/');
+    const decoded = JSON.parse(Buffer.from(p, 'base64').toString('utf8'));
+    expect(decoded.hosts).toEqual(['100.64.0.2', '192.168.1.20']);
+  });
+
+  it('accepts a v1 payload with no hosts (back-compat)', () => {
+    const parsed = PairingPayloadSchema.parse({
+      version: PROTOCOL_VERSION,
+      host: '100.64.0.2',
+      port: 7117,
+      token: validToken,
+      name: 'old',
+    });
+    expect(parsed.hosts).toBeUndefined();
   });
 
   it('rejects a wrong protocol version', () => {

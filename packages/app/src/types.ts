@@ -8,13 +8,17 @@ import type { PairingPayload } from '@pilot/shared';
 export interface PairedMachine {
   /** Stable id, derived from `host:port` so re-pairing updates instead of duplicating. */
   id: string;
-  /** Wire fields from the QR pairing payload (validated against PairingPayloadSchema). */
+  /** Primary host (for the id + display). Always also present in `hosts`. */
   host: string;
+  /** All candidate addresses (Tailscale, LAN, …); the app tries each. */
+  hosts: string[];
   port: number;
   token: string;
   name: string;
   /** ms since epoch; updated on successful /api/health ping. */
   lastSeenMs: number | null;
+  /** The host that last answered — tried first, and used for the terminal. */
+  lastGoodHost: string | null;
 }
 
 /** Construct a deterministic id for storage. */
@@ -23,13 +27,16 @@ export function machineId(host: string, port: number): string {
 }
 
 export function fromPairingPayload(p: PairingPayload): PairedMachine {
+  const hosts = p.hosts && p.hosts.length > 0 ? p.hosts : [p.host];
   return {
     id: machineId(p.host, p.port),
     host: p.host,
+    hosts,
     port: p.port,
     token: p.token,
     name: p.name,
     lastSeenMs: null,
+    lastGoodHost: null,
   };
 }
 

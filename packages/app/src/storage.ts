@@ -15,15 +15,33 @@ export async function listMachines(): Promise<PairedMachine[]> {
   try {
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    // Defensive: only return entries that look like PairedMachine.
-    return parsed.filter((m): m is PairedMachine => {
-      return (
-        !!m &&
-        typeof m.host === 'string' &&
-        typeof m.token === 'string' &&
-        typeof m.port === 'number'
-      );
-    });
+    // Defensive: only keep entries that look like a machine, then backfill
+    // fields added in later versions (hosts, lastGoodHost) so pre-existing
+    // pairings keep working.
+    return parsed
+      .filter(
+        (m) =>
+          !!m &&
+          typeof m.host === 'string' &&
+          typeof m.token === 'string' &&
+          typeof m.port === 'number',
+      )
+      .map((m): PairedMachine => {
+        const hosts =
+          Array.isArray(m.hosts) && m.hosts.length > 0
+            ? m.hosts.filter((h: unknown): h is string => typeof h === 'string')
+            : [m.host];
+        return {
+          id: typeof m.id === 'string' ? m.id : machineId(m.host, m.port),
+          host: m.host,
+          hosts: hosts.length > 0 ? hosts : [m.host],
+          port: m.port,
+          token: m.token,
+          name: typeof m.name === 'string' ? m.name : m.host,
+          lastSeenMs: typeof m.lastSeenMs === 'number' ? m.lastSeenMs : null,
+          lastGoodHost: typeof m.lastGoodHost === 'string' ? m.lastGoodHost : null,
+        };
+      });
   } catch {
     return [];
   }
@@ -60,5 +78,14 @@ export async function setLastSeen(id: string, lastSeenMs: number | null): Promis
   const i = machines.findIndex((m) => m.id === id);
   if (i < 0) return;
   const next = machines.map((m, idx) => (idx === i ? { ...m, lastSeenMs } : m));
+  await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+}
+
+/** Record which host last answered, so it's tried first and used for the terminal. */
+export async function setLastGoodHost(id: string, host: string): Promise<void> {
+  const machines = await listMachines();
+  const i = machines.findIndex((m) => m.id === id);
+  if (i < 0) return;
+  const next = machines.map((m, idx) => (idx === i ? { ...m, lastGoodHost: host } : m));
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
 }

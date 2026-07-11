@@ -10,10 +10,7 @@
 import { randomBytes } from 'node:crypto';
 import process from 'node:process';
 import WebSocket from 'ws';
-import {
-  HealthResponseSchema,
-  TOKEN_BYTES,
-} from '@pilot/shared';
+import { HealthResponseSchema, TOKEN_BYTES } from '@pilot/shared';
 import { startServer } from '../server.js';
 
 const MAX_LOGGED_CHUNKS = 20;
@@ -42,9 +39,7 @@ async function main(): Promise<void> {
   // 2) /api/health without a token returns 401.
   const unauthRes = await fetch(`http://127.0.0.1:${port}/api/health`);
   if (unauthRes.status !== 401) {
-    throw new Error(
-      `/api/health without auth: expected 401, got ${unauthRes.status}`,
-    );
+    throw new Error(`/api/health without auth: expected 401, got ${unauthRes.status}`);
   }
 
   // 3) WS round-trip on bash.
@@ -84,17 +79,14 @@ async function main(): Promise<void> {
         ACK_TIMEOUT_MS,
       );
       ws.on('message', (data) => {
-        const text =
-          typeof data === 'string' ? data : data.toString('utf8');
+        const text = typeof data === 'string' ? data : data.toString('utf8');
         captured += text;
         // Burst-log the first N chunks so a hung shell is debuggable.
         if (chunksLogged < MAX_LOGGED_CHUNKS) {
           chunksLogged += 1;
           console.log(
             `[smoke] chunk #${chunksLogged} (${text.length} chars):`,
-            JSON.stringify(
-              text.length > 200 ? text.slice(0, 200) + '…' : text,
-            ),
+            JSON.stringify(text.length > 200 ? text.slice(0, 200) + '…' : text),
           );
         }
         if (captured.includes(marker)) {
@@ -119,9 +111,7 @@ async function main(): Promise<void> {
   // 4) Bad token on upgrade returns 401 (no protocol switch).
   await new Promise<void>((resolve, reject) => {
     const sock = new WebSocket(
-      `ws://127.0.0.1:${port}/ws/pty?cwd=${encodeURIComponent(
-        process.cwd(),
-      )}&tool=bash`,
+      `ws://127.0.0.1:${port}/ws/pty?cwd=${encodeURIComponent(process.cwd())}&tool=bash`,
       { headers: { authorization: `Bearer ${'0'.repeat(64)}` } },
     );
     const t = setTimeout(
@@ -147,24 +137,17 @@ async function main(): Promise<void> {
       // 'unexpected-response' fires alongside 'error' on 401; only treat
       // as a real failure if the underlying message doesn't say 401.
       const msg = String(err);
-      if (
-        !msg.includes('401') &&
-        !msg.toLowerCase().includes('unauthorized')
-      ) {
+      if (!msg.includes('401') && !msg.toLowerCase().includes('unauthorized')) {
         reject(err);
       }
     });
   });
 
   await close();
-  console.log(
-    `[smoke] PASS — bash echoed "${marker}" and bad-auth was rejected`,
-  );
+  console.log(`[smoke] PASS — bash echoed "${marker}" and bad-auth was rejected`);
 }
 
 main().catch((err) => {
-  console.error(
-    `[smoke] FAIL — ${err instanceof Error ? err.message : err}`,
-  );
+  console.error(`[smoke] FAIL — ${err instanceof Error ? err.message : err}`);
   process.exit(1);
 });

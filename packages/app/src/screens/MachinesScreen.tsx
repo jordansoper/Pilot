@@ -9,7 +9,7 @@ import {
   View,
 } from 'react-native';
 import type { PairedMachine } from '../types.js';
-import { listMachines, removeMachine, setLastSeen } from '../storage.js';
+import { listMachines, removeMachine, setLastGoodHost, setLastSeen } from '../storage.js';
 import { HealthResponseSchema } from '@pilot/shared';
 
 export interface MachinesScreenProps {
@@ -20,29 +20,53 @@ export interface MachinesScreenProps {
 
 type Status = 'unknown' | 'checking' | 'online' | 'offline';
 
-/**
- * Pings /api/health and reports status. The 6s timeout is deliberately
- * generous: the phone's Tailscale tunnel to a peer often has to wake from
- * idle (sometimes via a DERP relay) on the first request, which can take
- * several seconds. A tight timeout flashes a spurious `offline` on the first
- * tap even though the machine is reachable.
- */
-async function pingOne(machine: PairedMachine): Promise<Status> {
+/** Ping one address. 6s timeout — generous for a cold Tailscale tunnel. */
+async function pingHost(machine: PairedMachine, host: string): Promise<boolean> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 6_000);
   try {
-    const res = await fetch(`http://${machine.host}:${machine.port}/api/health`, {
+    const res = await fetch(`http://${host}:${machine.port}/api/health`, {
       headers: { authorization: `Bearer ${machine.token}` },
       signal: controller.signal,
     });
-    if (!res.ok) return 'offline';
+    if (!res.ok) return false;
     HealthResponseSchema.parse(await res.json());
-    return 'online';
+    return true;
   } catch {
-    return 'offline';
+    return false;
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * Try every candidate address in parallel; the first that answers wins (LAN
+ * usually beats Tailscale on the same Wi-Fi). Returns the winning host so it
+ * can be preferred next time and used for the terminal.
+ */
+async function pingOne(
+  machine: PairedMachine,
+): Promise<{ status: Status; host: string | null }> {
+  const ordered = machine.lastGoodHost
+    ? [machine.lastGoodHost, ...machine.hosts.filter((h) => h !== machine.lastGoodHost)]
+    : machine.hosts;
+  if (ordered.length === 0) return { status: 'offline', host: null };
+
+  return new Promise((resolve) => {
+    let remaining = ordered.length;
+    let settled = false;
+    for (const host of ordered) {
+      void pingHost(machine, host).then((ok) => {
+        if (settled) return;
+        if (ok) {
+          settled = true;
+          resolve({ status: 'online', host });
+        } else if (--remaining === 0) {
+          resolve({ status: 'offline', host: null });
+        }
+      });
+    }
+  });
 }
 
 export function MachinesScreen({
@@ -52,6 +76,7 @@ export function MachinesScreen({
 }: MachinesScreenProps) {
   const [machines, setMachines] = useState<PairedMachine[]>([]);
   const [status, setStatus] = useState<Record<string, Status>>({});
+  const [activeHost, setActiveHost] = useState<Record<string, string>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
@@ -60,15 +85,14 @@ export function MachinesScreen({
     try {
       const list = await listMachines();
       setMachines(list);
-      const next: Record<string, Status> = {};
       const updates = list.map(async (m) => {
-        next[m.id] = 'checking';
         setStatus((s) => ({ ...s, [m.id]: 'checking' }));
-        const s = await pingOne(m);
-        next[m.id] = s;
+        const { status: s, host } = await pingOne(m);
         setStatus((cur) => ({ ...cur, [m.id]: s }));
-        if (s === 'online') {
+        if (s === 'online' && host) {
+          setActiveHost((cur) => ({ ...cur, [m.id]: host }));
           await setLastSeen(m.id, Date.now());
+          await setLastGoodHost(m.id, host);
         }
       });
       await Promise.all(updates);
@@ -145,7 +169,8 @@ export function MachinesScreen({
                 <View style={styles.rowText}>
                   <Text style={styles.rowTitle}>{m.name}</Text>
                   <Text style={styles.rowSubtitle}>
-                    {m.host}:{m.port}
+                    {activeHost[m.id] ?? m.host}:{m.port}
+                    {activeHost[m.id] ? ` · ${hostKind(activeHost[m.id]!)}` : ''}
                   </Text>
                 </View>
                 <Text style={styles.rowStatus}>{labelFor(s)}</Text>
@@ -156,6 +181,13 @@ export function MachinesScreen({
       )}
     </View>
   );
+}
+
+/** Label a connected address as Tailscale (100.64.0.0/10) or LAN. */
+function hostKind(host: string): string {
+  const p = host.split('.').map(Number);
+  const isTailscale = p.length === 4 && p[0] === 100 && p[1]! >= 64 && p[1]! <= 127;
+  return isTailscale ? 'Tailscale' : 'LAN';
 }
 
 function labelFor(s: Status): string {

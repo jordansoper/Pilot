@@ -7,8 +7,15 @@ import { PAIRING_SCHEME, PROTOCOL_VERSION, TOKEN_BYTES } from './constants.js';
  */
 export const PairingPayloadSchema = z.object({
   version: z.literal(PROTOCOL_VERSION),
-  /** Tailscale IP (or future transport host) of the CLI daemon. */
+  /** Primary host (kept for back-compat + display); always also in `hosts`. */
   host: z.string().min(1).max(253),
+  /**
+   * All addresses the daemon is reachable at (Tailscale IP, LAN IP, …). The
+   * app tries each and uses whichever answers, so one QR works both on the
+   * same Wi-Fi (direct/fast) and remotely over Tailscale. Optional for
+   * back-compat with v1 QRs that only carried `host`.
+   */
+  hosts: z.array(z.string().min(1).max(253)).min(1).max(6).optional(),
   /** TCP port the daemon listens on. */
   port: z.number().int().positive().max(65535),
   /**
@@ -99,12 +106,13 @@ export const PtyHelloQuerySchema = z.object({
 export function buildPairingUrl(
   payload: Pick<
     z.infer<typeof PairingPayloadSchema>,
-    'host' | 'port' | 'token' | 'name'
+    'host' | 'hosts' | 'port' | 'token' | 'name'
   >,
 ): string {
   const json = JSON.stringify({
     version: PROTOCOL_VERSION,
     host: payload.host,
+    ...(payload.hosts ? { hosts: payload.hosts } : {}),
     port: payload.port,
     token: payload.token,
     name: payload.name,
@@ -134,6 +142,7 @@ function base64UrlEncode(input: string): string {
  */
 export function buildPairingPayload(input: {
   host: string;
+  hosts?: string[];
   port: number;
   token: string;
   name: string;
@@ -141,6 +150,7 @@ export function buildPairingPayload(input: {
   return PairingPayloadSchema.parse({
     version: PROTOCOL_VERSION,
     host: input.host,
+    ...(input.hosts ? { hosts: input.hosts } : {}),
     port: input.port,
     token: input.token,
     name: input.name,

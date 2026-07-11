@@ -13,7 +13,9 @@ describe('buildPairingUrl', () => {
       name: 'mbp',
     });
     const url = buildPairingUrl(payload);
-    expect(url.startsWith(`${PAIRING_SCHEME}://pair?v=${PROTOCOL_VERSION}&p=`)).toBe(true);
+    expect(url.startsWith(`${PAIRING_SCHEME}://pair?v=${PROTOCOL_VERSION}&p=`)).toBe(
+      true,
+    );
   });
 
   it('round-trips the payload through base64url-encoded JSON in p=', () => {
@@ -27,9 +29,7 @@ describe('buildPairingUrl', () => {
     const parsed = new URL(url);
     const encoded = parsed.searchParams.get('p');
     expect(encoded).not.toBeNull();
-    const decoded = JSON.parse(
-      Buffer.from(encoded ?? '', 'base64url').toString('utf8'),
-    );
+    const decoded = JSON.parse(Buffer.from(encoded ?? '', 'base64url').toString('utf8'));
     expect(decoded.host).toBe(payload.host);
     expect(decoded.port).toBe(payload.port);
     expect(decoded.token).toBe(payload.token);

@@ -15,7 +15,7 @@ import {
 } from '@pilot/shared';
 import { checkBearer } from './auth.js';
 import { getLauncher } from './launchers.js';
-import { buildPairingPageHtml } from './pairing-page.js';
+import { buildPairingPageHtml, type PairingAddress } from './pairing-page.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -41,6 +41,8 @@ export interface ServerOptions {
   pairingUrl?: string;
   /** Friendly machine name, shown on the pairing page. */
   machineName?: string;
+  /** Reachable addresses shown under the QR on the pairing page. */
+  pairingAddresses?: PairingAddress[];
 }
 
 export interface RunningServer {
@@ -70,7 +72,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   // Pre-render the loopback pairing page once (the pairing URL is fixed for
   // the daemon's lifetime), so request handling stays synchronous.
   const pairingPageHtml = opts.pairingUrl
-    ? await buildPairingPageHtml(opts.pairingUrl, opts)
+    ? await buildPairingPageHtml(
+        opts.pairingUrl,
+        opts.machineName ?? 'this machine',
+        opts.pairingAddresses ?? [],
+      )
     : null;
   const httpServer = createServer((req, res) => {
     handleHttp(req, res, opts, actualPort, pairingPageHtml);
@@ -166,7 +172,11 @@ function debugLog(req: IncomingMessage, kind: string): void {
     (typeof req.headers['sec-websocket-protocol'] === 'string'
       ? req.headers['sec-websocket-protocol']
       : '');
-  const tok = raw.replace(/^bearer[,\s]+/i, '').trim().slice(0, 6) || 'none';
+  const tok =
+    raw
+      .replace(/^bearer[,\s]+/i, '')
+      .trim()
+      .slice(0, 6) || 'none';
   const from = req.socket.remoteAddress ?? '?';
   console.log(
     `[debug] ${kind} ${req.method ?? ''} ${req.url ?? ''} from=${from} token=${tok}`,

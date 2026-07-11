@@ -1,6 +1,13 @@
 import QRCode from 'qrcode';
 import { SHARED_PACKAGE_VERSION } from '@pilot/shared';
-import type { ServerOptions } from './server.js';
+
+/** One reachable address for display under the QR. */
+export interface PairingAddress {
+  /** e.g. "192.168.1.20:7117". */
+  address: string;
+  /** e.g. "Tailscale — works anywhere" or "Local network (en0)". */
+  label: string;
+}
 
 /** Escape a string for safe insertion into HTML text/attributes. */
 function esc(s: string): string {
@@ -12,27 +19,31 @@ function esc(s: string): string {
 }
 
 /**
- * Render the loopback pairing page: a crisp SVG QR plus the machine name,
- * Tailscale address, and the raw pilot:// URL for copy/paste. Shown at
- * `http://localhost:<port>/` on the machine running the daemon — far easier to
- * scan than the terminal ASCII QR.
+ * Render the loopback pairing page: ONE crisp SVG QR (the payload encodes
+ * every reachable address, so the app picks whichever answers — LAN when on
+ * the same Wi-Fi, Tailscale from anywhere), plus the list of addresses it
+ * covers. Shown at `http://localhost:<port>/` on the machine running the daemon.
  */
 export async function buildPairingPageHtml(
   pairingUrl: string,
-  opts: ServerOptions,
+  machineName: string,
+  addresses: PairingAddress[],
 ): Promise<string> {
   const qrSvg = await QRCode.toString(pairingUrl, {
     type: 'svg',
     margin: 2,
     errorCorrectionLevel: 'M',
   });
-  const name = esc(opts.machineName ?? 'this machine');
-  const address = opts.tailscaleIp
-    ? `${opts.tailscaleIp}:${opts.port}`
-    : `${opts.bind}:${opts.port}`;
-  const tailscaleWarning = opts.tailscaleIp
-    ? ''
-    : `<p class="warn">⚠ Tailscale not detected — the phone must be on the same machine/network to reach this.</p>`;
+  const addrRows = addresses
+    .map(
+      (a) =>
+        `<div class="addr"><span class="ip">${esc(a.address)}</span><span class="lbl">${esc(a.label)}</span></div>`,
+    )
+    .join('\n');
+  const empty =
+    addresses.length === 0
+      ? `<p class="warn">⚠ No reachable address found (no Tailscale IP, no LAN IP).</p>`
+      : '';
 
   return `<!doctype html>
 <html lang="en">
@@ -56,20 +67,23 @@ export async function buildPairingPageHtml(
   }
   h1 { margin: 0 0 4px; font-size: 20px; }
   .sub { margin: 0 0 20px; color: #9ca3af; font-size: 14px; }
-  .qr {
-    background: #fff; border-radius: 12px; padding: 16px; display: inline-block;
-    line-height: 0;
-  }
+  .qr { background: #fff; border-radius: 12px; padding: 16px; display: inline-block; line-height: 0; }
   .qr svg { width: 288px; height: 288px; display: block; }
-  .name { margin: 20px 0 2px; font-size: 16px; font-weight: 600; }
-  .addr { color: #9ca3af; font-size: 13px; font-family: ui-monospace, Menlo, monospace; }
-  .warn { color: #fbbf24; font-size: 13px; margin: 14px 0 0; }
-  details { margin-top: 18px; text-align: left; }
-  summary { cursor: pointer; color: #9ca3af; font-size: 13px; }
+  .name { margin: 18px 0 12px; font-size: 16px; font-weight: 600; }
+  .addr {
+    display: flex; justify-content: space-between; gap: 12px;
+    padding: 8px 12px; margin-top: 6px; background: #0f1115;
+    border: 1px solid #262b36; border-radius: 8px; text-align: left;
+  }
+  .ip { font-family: ui-monospace, Menlo, monospace; font-size: 13px; color: #e5e7eb; }
+  .lbl { font-size: 12px; color: #38bdf8; }
+  .warn { color: #fbbf24; font-size: 13px; }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; color: #6b7280; font-size: 12px; }
   .url {
-    margin-top: 8px; padding: 10px; background: #0f1115; border: 1px solid #262b36;
-    border-radius: 8px; font-family: ui-monospace, Menlo, monospace; font-size: 11px;
-    color: #9ca3af; word-break: break-all; user-select: all;
+    margin-top: 6px; padding: 8px; background: #0f1115; border: 1px solid #262b36;
+    border-radius: 8px; font-family: ui-monospace, Menlo, monospace; font-size: 10px;
+    color: #9ca3af; word-break: break-all; user-select: all; text-align: left;
   }
   .foot { margin-top: 20px; color: #4b5563; font-size: 11px; }
 </style>
@@ -77,15 +91,12 @@ export async function buildPairingPageHtml(
 <body>
   <div class="card">
     <h1>Pair with Pilot</h1>
-    <p class="sub">Open the Pilot app on your phone → <b>+ Pair</b> → scan this code.</p>
+    <p class="sub">Open the Pilot app → <b>+ Pair</b> → scan this code. One code works on Wi-Fi and over Tailscale.</p>
     <div class="qr">${qrSvg}</div>
-    <p class="name">${name}</p>
-    <p class="addr">${esc(address)}</p>
-    ${tailscaleWarning}
-    <details>
-      <summary>Can't scan? Copy the pairing link</summary>
-      <div class="url">${esc(pairingUrl)}</div>
-    </details>
+    <p class="name">${esc(machineName)}</p>
+    ${empty}
+    ${addrRows}
+    <details><summary>Can't scan? Copy the link</summary><div class="url">${esc(pairingUrl)}</div></details>
     <p class="foot">pilot-cli v${esc(SHARED_PACKAGE_VERSION)} · this page is only visible on this computer</p>
   </div>
 </body>

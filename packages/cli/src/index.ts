@@ -17,7 +17,9 @@ import {
 } from '@pilot/shared';
 import { buildPairingPayload, buildPairingUrl, renderPairingQr } from './pairing.js';
 import { startServer } from './server.js';
+import type { PairingAddress } from './pairing-page.js';
 import { getTailscaleIp } from './tailscale.js';
+import { getLanIpv4s } from './network.js';
 import { loadOrCreateToken } from './token.js';
 
 interface CliArgs {
@@ -26,6 +28,8 @@ interface CliArgs {
   name: string;
   noQr: boolean;
   rotateToken: boolean;
+  /** Explicit host(s) to advertise in the QR, overriding auto-detection. */
+  hosts: string[];
 }
 
 function parseArgs(argv: string[]): CliArgs {
@@ -35,6 +39,7 @@ function parseArgs(argv: string[]): CliArgs {
     name: hostname(),
     noQr: false,
     rotateToken: false,
+    hosts: [],
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -59,6 +64,10 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case '--no-qr':
         args.noQr = true;
+        break;
+      case '--host':
+        // Repeatable: --host 192.168.1.20 --host 100.x.y.z
+        args.hosts.push(String(next()));
         break;
       case '--rotate-token':
         args.rotateToken = true;
@@ -87,6 +96,9 @@ Flags:
   --bind, -b <ip>  IP to bind to (default ${DEFAULT_BIND})
   --name, -n <s>   Friendly machine name in the QR (default: hostname)
   --no-qr          Print pairing URL but skip the ASCII QR (for headless)
+  --host <ip>      Advertise this address in the QR (repeatable). Overrides
+                   auto-detection. Default: Tailscale IP + LAN IP(s), so one
+                   QR works on the same Wi-Fi and remotely.
   --rotate-token   Generate a fresh token (invalidates existing pairings)
   -h, --help       Print this help
 
@@ -107,11 +119,41 @@ async function main(): Promise<void> {
   });
   const tailscaleIp = await getTailscaleIp();
 
-  // The pairing payload MUST use a Tailscale-routable host. If we couldn't
-  // find one, we still print a payload but with the local bind IP — pairing
-  // will work only when the phone is on the same machine. We make this loud.
+  // Assemble every address the phone might use. One QR carries them all, and
+  // the app tries each — LAN when on the same Wi-Fi (fast, no Tailscale needed),
+  // Tailscale from anywhere. `--host` overrides auto-detection.
+  const addresses: PairingAddress[] = [];
+  if (args.hosts.length > 0) {
+    for (const h of args.hosts)
+      addresses.push({ address: `${h}:${args.port}`, label: 'Custom' });
+  } else {
+    if (tailscaleIp) {
+      addresses.push({
+        address: `${tailscaleIp}:${args.port}`,
+        label: 'Tailscale — anywhere',
+      });
+    }
+    for (const lan of getLanIpv4s()) {
+      addresses.push({
+        address: `${lan.address}:${args.port}`,
+        label: `Local network (${lan.iface}) — same Wi-Fi`,
+      });
+    }
+  }
+
+  const hosts =
+    args.hosts.length > 0
+      ? args.hosts
+      : [...(tailscaleIp ? [tailscaleIp] : []), ...getLanIpv4s().map((l) => l.address)];
+  // Fall back to the bind address if nothing was detected (single-machine use).
+  if (hosts.length === 0) {
+    hosts.push(args.bind);
+    addresses.push({ address: `${args.bind}:${args.port}`, label: 'Local' });
+  }
+
   const payload = buildPairingPayload({
-    host: tailscaleIp ?? args.bind,
+    host: hosts[0]!,
+    hosts,
     port: args.port,
     token,
     name: args.name,
@@ -124,16 +166,14 @@ async function main(): Promise<void> {
       ? `Token: new token written to ${tokenPath} — pair once; it persists across restarts.`
       : `Token: reusing ${tokenPath} — existing pairings still valid (use --rotate-token to revoke).`,
   );
-  if (tailscaleIp) {
-    console.log(
-      `Tailscale IP: ${tailscaleIp}  ·  Listening on ${args.bind}:${args.port}  ·  Name: ${payload.name}`,
-    );
-  } else {
-    console.log(
-      `⚠ Tailscale not detected. Falling back to ${args.bind} — pairing will only work on this machine.`,
-    );
-    console.log(`Listening on ${args.bind}:${args.port}  ·  Name: ${payload.name}`);
+  if (!tailscaleIp && args.hosts.length === 0) {
+    console.log('⚠ Tailscale not detected — advertising LAN address(es) only.');
   }
+  console.log(
+    `Listening on ${args.bind}:${args.port}  ·  Name: ${payload.name}  ·  Reachable at: ${hosts
+      .map((h) => `${h}:${args.port}`)
+      .join(', ')}`,
+  );
   renderPairingQr(url, { silent: args.noQr });
 
   const server = await startServer({
@@ -143,6 +183,7 @@ async function main(): Promise<void> {
     tailscaleIp,
     pairingUrl: url,
     machineName: payload.name,
+    pairingAddresses: addresses,
   });
   console.log(`HTTP server ready on http://${args.bind}:${server.port}`);
   console.log(`Pairing page (scan a crisp QR here): http://localhost:${server.port}/`);

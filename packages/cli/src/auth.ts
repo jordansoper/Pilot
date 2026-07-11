@@ -30,7 +30,10 @@ function matchHexToken(input: string, expected: string): boolean {
 }
 
 function commaList(input: string): string[] {
-  return input.split(',').map((s) => s.trim()).filter(Boolean);
+  return input
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /**
