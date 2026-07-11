@@ -153,6 +153,26 @@ function isLoopback(req: IncomingMessage): boolean {
   return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
 }
 
+/**
+ * Opt-in per-request logging (set `PILOT_DEBUG=1`). Prints who connected, to
+ * what path, and the token prefix they presented — so a "why is my phone
+ * offline" investigation can see whether the phone reaches the daemon at all
+ * and whether its token matches. Off by default; never logs the full token.
+ */
+function debugLog(req: IncomingMessage, kind: string): void {
+  if (!process.env['PILOT_DEBUG']) return;
+  const raw =
+    req.headers.authorization ??
+    (typeof req.headers['sec-websocket-protocol'] === 'string'
+      ? req.headers['sec-websocket-protocol']
+      : '');
+  const tok = raw.replace(/^bearer[,\s]+/i, '').trim().slice(0, 6) || 'none';
+  const from = req.socket.remoteAddress ?? '?';
+  console.log(
+    `[debug] ${kind} ${req.method ?? ''} ${req.url ?? ''} from=${from} token=${tok}`,
+  );
+}
+
 function handleHttp(
   req: IncomingMessage,
   res: ServerResponse,
@@ -160,6 +180,7 @@ function handleHttp(
   actualPort: number,
   pairingPageHtml: string | null,
 ): void {
+  debugLog(req, 'HTTP');
   const url = new URL(req.url ?? '/', `http://${opts.bind}:${actualPort}`);
 
   // Loopback-only pairing page. Served BEFORE auth (it has no token) but only
@@ -216,6 +237,7 @@ function handleUpgrade(
   opts: ServerOptions,
   actualPort: number,
 ): void {
+  debugLog(req, 'WS-upgrade');
   const url = new URL(req.url ?? '/', `http://${opts.bind}:${actualPort}`);
   if (url.pathname !== WS_PATH) {
     socket.destroy();

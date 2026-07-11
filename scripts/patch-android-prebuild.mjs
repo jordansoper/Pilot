@@ -65,6 +65,26 @@ for (const rel of [
   }
 }
 
+// 3. AndroidManifest.xml — allow cleartext HTTP. Release builds default
+//    usesCleartextTraffic to OFF, which blocks the app's plain http:// calls
+//    to the daemon (health checks + the terminal WebSocket) over Tailscale —
+//    the request never leaves the phone, so the machine shows "offline" no
+//    matter what. The Tailscale tunnel is already WireGuard-encrypted, so
+//    cleartext inside it is fine. (A tighter alternative is a network-security
+//    config that permits cleartext only for 100.64.0.0/10 + localhost.)
+const manifestPath = join(androidDir, 'app/src/main/AndroidManifest.xml');
+if (existsSync(manifestPath)) {
+  const m = readFileSync(manifestPath, 'utf8');
+  if (!m.includes('usesCleartextTraffic')) {
+    writeFileSync(
+      manifestPath,
+      m.replace('<application ', '<application android:usesCleartextTraffic="true" '),
+    );
+    console.log('[patch-android] AndroidManifest.xml: enabled usesCleartextTraffic');
+    changed += 1;
+  }
+}
+
 if (changed === 0) {
   console.log('[patch-android] nothing to patch (already applied)');
 }
