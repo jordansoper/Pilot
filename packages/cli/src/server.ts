@@ -1,14 +1,20 @@
 import fs from 'node:fs';
+import path from 'node:path';
+import { homedir } from 'node:os';
 import process from 'node:process';
 import type { Duplex } from 'node:stream';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import {
+  FS_ALLOWLIST_ROOT_ENV,
+  FS_PATH,
   HEALTH_PATH,
   PROTOCOL_VERSION,
   PtyHelloQuerySchema,
+  SESSIONS_PATH,
   SHARED_PACKAGE_VERSION,
   WS_PATH,
+  type FsResponse,
   type HealthResponse,
   type PtyHelloQuery,
 } from '@pilot/shared';
@@ -69,6 +75,7 @@ function rawToBuffer(data: RawData): Buffer {
  */
 export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   let actualPort = opts.port;
+  const sessions = new SessionManager();
   // Pre-render the loopback pairing page once (the pairing URL is fixed for
   // the daemon's lifetime), so request handling stays synchronous.
   const pairingPageHtml = opts.pairingUrl
@@ -79,7 +86,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       )
     : null;
   const httpServer = createServer((req, res) => {
-    handleHttp(req, res, opts, actualPort, pairingPageHtml);
+    handleHttp(req, res, opts, actualPort, pairingPageHtml, sessions);
   });
 
   const wss = new WebSocketServer({
@@ -112,7 +119,6 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   }, HEARTBEAT_INTERVAL_MS);
   wss.on('close', () => clearInterval(heartbeat));
 
-  const sessions = new SessionManager();
   wss.on('connection', (ws: WebSocket, req) => {
     live.set(ws, true);
     ws.on('pong', () => live.set(ws, true));
@@ -185,12 +191,44 @@ function debugLog(req: IncomingMessage, kind: string): void {
   );
 }
 
+/** Allowlist root for `/api/fs` — nothing above this is browsable. */
+function fsRoot(): string {
+  return path.resolve(process.env[FS_ALLOWLIST_ROOT_ENV] || homedir());
+}
+
+/** Browse a directory under the allowlist root. Ends the response. */
+async function handleFs(res: ServerResponse, url: URL): Promise<void> {
+  const root = fsRoot();
+  const requested = url.searchParams.get('path');
+  const resolved = requested ? path.resolve(requested) : root;
+  // Reject anything outside the root (path-escape protection).
+  if (resolved !== root && !resolved.startsWith(root + path.sep)) {
+    sendJson(res, 400, { error: 'path outside allowlist', root });
+    return;
+  }
+  try {
+    const dirents = await fs.promises.readdir(resolved, { withFileTypes: true });
+    const entries = dirents
+      .filter((d) => !d.name.startsWith('.') && (d.isDirectory() || d.isFile()))
+      .map((d) => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' }) as const)
+      // Directories first, then alphabetical — good for a folder picker.
+      .sort((a, b) =>
+        a.type !== b.type ? (a.type === 'dir' ? -1 : 1) : a.name.localeCompare(b.name),
+      );
+    const body: FsResponse = { path: resolved, entries };
+    sendJson(res, 200, body);
+  } catch {
+    sendJson(res, 400, { error: 'cannot read path', path: resolved });
+  }
+}
+
 function handleHttp(
   req: IncomingMessage,
   res: ServerResponse,
   opts: ServerOptions,
   actualPort: number,
   pairingPageHtml: string | null,
+  sessions: SessionManager,
 ): void {
   debugLog(req, 'HTTP');
   const url = new URL(req.url ?? '/', `http://${opts.bind}:${actualPort}`);
@@ -228,6 +266,14 @@ function handleHttp(
       port: actualPort,
     };
     sendJson(res, 200, body);
+    return;
+  }
+  if (url.pathname === SESSIONS_PATH) {
+    sendJson(res, 200, { sessions: sessions.list() });
+    return;
+  }
+  if (url.pathname === FS_PATH) {
+    void handleFs(res, url);
     return;
   }
   sendJson(res, 404, { error: 'not found' });

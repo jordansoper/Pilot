@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -14,7 +15,7 @@ import { HealthResponseSchema } from '@pilot/shared';
 
 export interface MachinesScreenProps {
   onAddMachine: () => void;
-  onOpenTerminal: (machineId: string) => void;
+  onOpenMachine: (machineId: string) => void;
   onOpenSettings: () => void;
 }
 
@@ -71,7 +72,7 @@ async function pingOne(
 
 export function MachinesScreen({
   onAddMachine,
-  onOpenTerminal,
+  onOpenMachine,
   onOpenSettings,
 }: MachinesScreenProps) {
   const [machines, setMachines] = useState<PairedMachine[]>([]);
@@ -107,9 +108,21 @@ export function MachinesScreen({
   }, [refresh]);
 
   const handleRemove = useCallback(
-    async (id: string) => {
-      await removeMachine(id);
-      void refresh();
+    (machine: PairedMachine) => {
+      Alert.alert(
+        'Remove machine?',
+        `"${machine.name}" (${machine.host}) will be removed. You'll need to pair again from its QR code to reconnect.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Remove',
+            style: 'destructive',
+            onPress: () => {
+              void removeMachine(machine.id).then(refresh);
+            },
+          },
+        ],
+      );
     },
     [refresh],
   );
@@ -162,8 +175,8 @@ export function MachinesScreen({
               <TouchableOpacity
                 key={m.id}
                 style={styles.row}
-                onPress={() => onOpenTerminal(m.id)}
-                onLongPress={() => handleRemove(m.id)}
+                onPress={() => onOpenMachine(m.id)}
+                onLongPress={() => handleRemove(m)}
               >
                 <View style={[styles.dot, dotStyles[s]]} />
                 <View style={styles.rowText}>

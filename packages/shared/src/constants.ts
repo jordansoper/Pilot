@@ -11,6 +11,7 @@ export const DEFAULT_BIND = '127.0.0.1';
 export const HEALTH_PATH = '/api/health';
 export const FS_PATH = '/api/fs';
 export const TOOLS_PATH = '/api/tools';
+export const SESSIONS_PATH = '/api/sessions';
 export const WS_PATH = '/ws/pty';
 
 /** Deep-link scheme used by the QR pairing flow. */

@@ -11,6 +11,8 @@ import type { Screen } from './src/types.js';
 import { MachinesScreen } from './src/screens/MachinesScreen.js';
 import { AddMachineScreen } from './src/screens/AddMachineScreen.js';
 import { SettingsScreen } from './src/screens/SettingsScreen.js';
+import { SessionsScreen } from './src/screens/SessionsScreen.js';
+import { FilePickerScreen } from './src/screens/FilePickerScreen.js';
 import { TerminalScreen } from './src/screens/TerminalScreen.js';
 
 const HOME: Screen = { name: 'machines' };
@@ -32,6 +34,11 @@ export default function App() {
   const back = useCallback(() => {
     setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
   }, []);
+  // Replace the top screen (e.g. folder picker → terminal), so Back skips it.
+  const replace = useCallback(
+    (screen: Screen) => setStack((s) => [...s.slice(0, -1), screen]),
+    [],
+  );
   const goHome = useCallback(() => setStack([HOME]), []);
 
   // Android hardware back: pop the stack; only let the OS exit from home.
@@ -54,7 +61,7 @@ export default function App() {
       {current.name === 'machines' && (
         <MachinesScreen
           onAddMachine={() => push({ name: 'addMachine' })}
-          onOpenTerminal={(machineId) => push({ name: 'terminal', machineId })}
+          onOpenMachine={(machineId) => push({ name: 'sessions', machineId })}
           onOpenSettings={() => push({ name: 'settings' })}
         />
       )}
@@ -62,8 +69,32 @@ export default function App() {
         <AddMachineScreen onDone={back} onCancel={back} />
       )}
       {current.name === 'settings' && <SettingsScreen onBack={back} onReset={goHome} />}
+      {current.name === 'sessions' && (
+        <SessionsScreen
+          machineId={current.machineId}
+          onBack={back}
+          onOpenSession={(sessionId) =>
+            push({ name: 'terminal', machineId: current.machineId, sessionId })
+          }
+          onNewSession={() => push({ name: 'filePicker', machineId: current.machineId })}
+        />
+      )}
+      {current.name === 'filePicker' && (
+        <FilePickerScreen
+          machineId={current.machineId}
+          onBack={back}
+          onPick={(cwd) =>
+            replace({ name: 'terminal', machineId: current.machineId, cwd })
+          }
+        />
+      )}
       {current.name === 'terminal' && (
-        <TerminalScreen machineId={current.machineId} onBack={back} />
+        <TerminalScreen
+          machineId={current.machineId}
+          sessionId={current.sessionId}
+          cwd={current.cwd}
+          onBack={back}
+        />
       )}
     </SafeAreaView>
   );

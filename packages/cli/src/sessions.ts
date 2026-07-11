@@ -14,6 +14,12 @@ const REAP_INTERVAL_MS = 60 * 1000;
 export interface PtySession {
   id: string;
   term: IPty;
+  /** Working directory the session was launched in. */
+  cwd: string;
+  /** Tool id the session runs (e.g. "bash"). */
+  tool: string;
+  /** Unix epoch ms when created. */
+  createdMs: number;
   /** Bounded tail of PTY output, replayed when a client re-attaches. */
   buffer: string;
   /** Current output sink (the attached WebSocket), or null when detached. */
@@ -60,6 +66,9 @@ export class SessionManager {
     const session: PtySession = {
       id: randomUUID(),
       term,
+      cwd: ctx.cwd,
+      tool: hello.tool,
+      createdMs: Date.now(),
       buffer: '',
       sink: null,
       onExit: null,
@@ -122,6 +131,26 @@ export class SessionManager {
       }
       if (oldest) this.remove(oldest.id);
     }
+  }
+
+  /** Snapshot of live sessions for `GET /api/sessions`, newest first. */
+  list(): Array<{
+    id: string;
+    cwd: string;
+    tool: string;
+    createdMs: number;
+    attached: boolean;
+  }> {
+    return [...this.sessions.values()]
+      .filter((s) => s.alive)
+      .sort((a, b) => b.createdMs - a.createdMs)
+      .map((s) => ({
+        id: s.id,
+        cwd: s.cwd,
+        tool: s.tool,
+        createdMs: s.createdMs,
+        attached: s.attached,
+      }));
   }
 
   closeAll(): void {

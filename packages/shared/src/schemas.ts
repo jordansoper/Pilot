@@ -64,6 +64,25 @@ export const ToolsResponseSchema = z.object({
   tools: z.array(ToolInfoSchema),
 });
 
+/** One running terminal session on the daemon. */
+export const SessionInfoSchema = z.object({
+  /** Session id (UUID) — pass as `?session=` on `/ws/pty` to re-attach. */
+  id: z.string().uuid(),
+  /** Working directory the session was launched in. */
+  cwd: z.string().min(1),
+  /** Tool id the session runs (e.g. "bash"). */
+  tool: z.string().min(1),
+  /** Unix epoch ms when the session was created. */
+  createdMs: z.number().int().nonnegative(),
+  /** Whether a client is currently attached. */
+  attached: z.boolean(),
+});
+
+/** Response payload of `GET /api/sessions`. */
+export const SessionsResponseSchema = z.object({
+  sessions: z.array(SessionInfoSchema),
+});
+
 /** Response payload of `GET /api/health`. */
 export const HealthResponseSchema = z.object({
   /** The cli package version. */

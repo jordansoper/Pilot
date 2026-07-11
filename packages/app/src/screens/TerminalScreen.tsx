@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
-import { clearSessionId, getSessionId, listMachines, setSessionId } from '../storage.js';
+import { listMachines } from '../storage.js';
 import type { PairedMachine } from '../types.js';
 
 /**
@@ -189,17 +189,22 @@ const BASE_URL = 'http://pilot.local';
 
 export interface TerminalScreenProps {
   machineId: string;
+  /** Existing session to re-attach to, or undefined to start a new one. */
+  sessionId?: string;
+  /** Working directory for a NEW session (from the folder picker). */
+  cwd?: string;
   onBack: () => void;
 }
 
-export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
+export function TerminalScreen({
+  machineId,
+  sessionId,
+  cwd,
+  onBack,
+}: TerminalScreenProps) {
   const [machine, setMachine] = useState<PairedMachine | null>(null);
-  const [cwd, setCwd] = useState(DEFAULT_CWD);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('connecting…');
-  // Session id to resume, loaded once before the WebView mounts.
-  const [initialSession, setInitialSession] = useState<string>('');
-  const [sessionLoaded, setSessionLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -211,11 +216,7 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
         setError('Machine no longer paired.');
         return;
       }
-      const sid = await getSessionId(machineId);
-      if (cancelled) return;
       setMachine(m);
-      setInitialSession(sid ?? '');
-      setSessionLoaded(true);
     })();
     return () => {
       cancelled = true;
@@ -231,12 +232,8 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
       else if (msg.type === 'error') setError(msg.message ?? 'error');
       else if (msg.type === 'size') setStatus(`connected · ${msg.cols}×${msg.rows}`);
       else if (msg.type === 'session') {
-        // Persist so a full app restart can resume the same shell.
-        void setSessionId(machineId, msg.id);
         setStatus(msg.resumed ? 'resumed session' : 'new session');
       } else if (msg.type === 'exit') {
-        // Shell ended — drop the stored id so next open starts fresh.
-        void clearSessionId(machineId);
         setStatus('session ended');
       }
     } catch {
@@ -256,7 +253,7 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
     );
   }
 
-  if (!machine || !sessionLoaded) {
+  if (!machine) {
     return (
       <View style={styles.root}>
         <Header onBack={onBack} status={status} />
@@ -273,26 +270,15 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
     host: machine.lastGoodHost ?? machine.hosts[0] ?? machine.host,
     port: String(machine.port),
     token: machine.token,
-    cwd,
+    cwd: cwd ?? DEFAULT_CWD,
     cols: 80,
     rows: 24,
-    session: initialSession,
+    session: sessionId ?? '',
   });
 
   return (
     <View style={styles.root}>
       <Header onBack={onBack} status={status} />
-      <View style={styles.bar}>
-        <TextInput
-          style={styles.cwdInput}
-          value={cwd}
-          onChangeText={setCwd}
-          placeholder="/path/inside/the/machine"
-          placeholderTextColor="#666"
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-      </View>
       <View style={styles.web}>
         <WebView
           style={styles.web}
@@ -305,11 +291,10 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
           }
           mixedContentMode="always"
           javaScriptCanOpenWindowsAutomatically={false}
-          // Keyed by machine only (not cwd) so the terminal is stable — it must
-          // NOT remount/reset when backgrounded or when the cwd field changes;
-          // the session persists and reconnects itself. cwd is the initial
-          // launch dir, read once at mount.
-          key={machine.id}
+          // Stable within a mount so backgrounding doesn't reset the terminal;
+          // keyed by the specific session/cwd so opening a different session
+          // gets a fresh WebView.
+          key={`${machine.id}|${sessionId ?? `new:${cwd ?? ''}`}`}
         />
       </View>
     </View>
