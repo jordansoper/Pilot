@@ -251,7 +251,9 @@ function handleHttp(
     return;
   }
 
-  if (req.method !== 'GET') {
+  // Loopback pairing page is GET-only (it's served before this method guard).
+  // We accept GET + DELETE; DELETE is only meaningful for `/api/sessions/:id`.
+  if (req.method !== 'GET' && req.method !== 'DELETE') {
     sendJson(res, 405, { error: 'method not allowed' });
     return;
   }
@@ -269,7 +271,34 @@ function handleHttp(
     return;
   }
   if (url.pathname === SESSIONS_PATH) {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
     sendJson(res, 200, { sessions: sessions.list() });
+    return;
+  }
+  if (req.method === 'DELETE' && url.pathname.startsWith(SESSIONS_PATH + '/')) {
+    const id = url.pathname.slice(SESSIONS_PATH.length + 1);
+    // Reject non-UUID path segments as 404 (not 405): from the client's view
+    // they're asking about a session that doesn't exist, not the wrong verb.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+      sendJson(res, 404, { error: 'session not found' });
+      return;
+    }
+    const exists = sessions.list().some((s) => s.id === id);
+    if (!exists) {
+      sendJson(res, 404, { error: 'session not found' });
+      return;
+    }
+    // `remove` kills the PTY; the existing `onExit` callback on the WS
+    // connection immediately forwards a binary `{type:'exit'}` control
+    // frame to any attached client and closes the socket — so killing a
+    // session that's currently in use cleanly drops the user out at their
+    // terminal.
+    sessions.remove(id);
+    res.writeHead(204);
+    res.end();
     return;
   }
   if (url.pathname === FS_PATH) {

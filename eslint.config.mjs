@@ -64,6 +64,17 @@ export default [
     },
   },
 
+  // Desktop Electron renderer (browser globals — runs in a sandboxed
+  // BrowserWindow, no Node, no modules).
+  {
+    files: ['packages/desktop/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: { ...globals.browser },
+    },
+  },
+
   // React Native / Expo (browser globals + JSX)
   {
     files: ['packages/app/**/*.{ts,tsx}'],
