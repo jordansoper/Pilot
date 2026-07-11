@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
-import { listMachines } from '../storage.js';
+import { clearSessionId, getSessionId, listMachines, setSessionId } from '../storage.js';
 import type { PairedMachine } from '../types.js';
 
 /**
@@ -41,6 +41,7 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
   var CWD = "__CWD__";
   var COLS = parseInt("__COLS__", 10) || 80;
   var ROWS = parseInt("__ROWS__", 10) || 24;
+  var SESSION = "__SESSION__"; // stored session id to resume, or empty
 
   function post(msg) {
     if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
@@ -65,36 +66,78 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
   term.open(document.getElementById('term'));
   try { fit.fit(); } catch (_) { /* terminal may not yet be measurable */ }
 
-  var wsUrl = 'ws://' + HOST + ':' + PORT + '/ws/pty'
-    + '?cwd=' + encodeURIComponent(CWD)
-    + '&tool=bash'
-    + '&cols=' + term.cols
-    + '&rows=' + term.rows;
-  // token is sent as the subprotocol entry — the CLI auth.ts bridges this.
-  var ws = new WebSocket(wsUrl, TOKEN);
+  // The shell lives on the daemon and survives disconnects. We reconnect on
+  // drop (e.g. returning from the background) and re-attach to the same
+  // session by id — the daemon replays the scrollback, so you land back
+  // exactly where you left off.
+  var currentSession = SESSION || null;
+  var ws = null;
+  var retry = 0;
+  var stopped = false; // true once the shell exits — no more reconnects
 
-  ws.onopen = function () {
-    term.write('\\x1b[2m── connected ──\\x1b[0m\\r\\n');
-    try { fit.fit(); } catch (_) {}
-    post({ type: 'ready', cols: term.cols, rows: term.rows });
-  };
-  ws.onmessage = function (ev) {
-    term.write(ev.data);
-  };
-  ws.onclose = function (ev) {
-    term.write('\\r\\n\\x1b[2m── closed (' + ev.code + ') ──\\x1b[0m\\r\\n');
-    post({ type: 'closed', code: ev.code, reason: ev.reason || '' });
-  };
-  ws.onerror = function () {
-    term.write('\\r\\n\\x1b[31m── error ──\\x1b[0m\\r\\n');
-    post({ type: 'error', message: 'websocket error' });
-  };
+  function wsUrl() {
+    var u = 'ws://' + HOST + ':' + PORT + '/ws/pty'
+      + '?cwd=' + encodeURIComponent(CWD)
+      + '&tool=bash'
+      + '&cols=' + term.cols
+      + '&rows=' + term.rows;
+    if (currentSession) u += '&session=' + encodeURIComponent(currentSession);
+    return u;
+  }
+
+  // Control frames arrive as BINARY (ArrayBuffer); PTY output arrives as text.
+  function decodeControl(buf) {
+    var bytes = new Uint8Array(buf);
+    var s = '';
+    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    try { return JSON.parse(s); } catch (_) { return null; }
+  }
+
+  function connect() {
+    // token is sent as the subprotocol entry — the CLI auth.ts bridges this.
+    ws = new WebSocket(wsUrl(), TOKEN);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = function () {
+      retry = 0;
+      try { fit.fit(); } catch (_) {}
+      post({ type: 'ready', cols: term.cols, rows: term.rows });
+    };
+    ws.onmessage = function (ev) {
+      if (typeof ev.data === 'string') { term.write(ev.data); return; }
+      var msg = decodeControl(ev.data);
+      if (!msg) return;
+      if (msg.type === 'session') {
+        currentSession = msg.id;
+        post({ type: 'session', id: msg.id, resumed: !!msg.resumed });
+        // Resuming: clear whatever is on screen; the replay that follows
+        // rebuilds it, avoiding duplicated scrollback.
+        if (msg.resumed) { term.reset(); }
+      } else if (msg.type === 'exit') {
+        stopped = true;
+        currentSession = null;
+        term.write('\\r\\n\\x1b[2m── session ended ──\\x1b[0m\\r\\n');
+        post({ type: 'exit', exitCode: msg.exitCode });
+      }
+    };
+    ws.onclose = function (ev) {
+      post({ type: 'closed', code: ev.code, reason: ev.reason || '' });
+      if (stopped || ev.code === 1000) return; // exited cleanly — stop
+      retry = Math.min(retry + 1, 6);
+      var delay = Math.min(1000 * Math.pow(2, retry - 1), 10000);
+      post({ type: 'reconnecting', inMs: delay });
+      setTimeout(connect, delay);
+    };
+    ws.onerror = function () {
+      post({ type: 'error', message: 'websocket error' });
+    };
+  }
 
   term.onData(function (data) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
   });
   term.onResize(function (sz) {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'resize', cols: sz.cols, rows: sz.rows }));
     }
     post({ type: 'size', cols: sz.cols, rows: sz.rows });
@@ -103,6 +146,8 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
   window.addEventListener('resize', function () {
     try { fit.fit(); } catch (_) {}
   });
+
+  connect();
 })();
 </script>
 </body></html>`;
@@ -115,6 +160,7 @@ function renderHtml(opts: {
   cwd: string;
   cols: number;
   rows: number;
+  session: string;
 }): string {
   return TERMINAL_HTML_TEMPLATE.replace(/__([A-Z]+)__/g, (_, key: string) => {
     switch (key) {
@@ -130,6 +176,8 @@ function renderHtml(opts: {
         return String(opts.cols);
       case 'ROWS':
         return String(opts.rows);
+      case 'SESSION':
+        return opts.session;
       default:
         return '';
     }
@@ -149,6 +197,9 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
   const [cwd, setCwd] = useState(DEFAULT_CWD);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('connecting…');
+  // Session id to resume, loaded once before the WebView mounts.
+  const [initialSession, setInitialSession] = useState<string>('');
+  const [sessionLoaded, setSessionLoaded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -160,7 +211,11 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
         setError('Machine no longer paired.');
         return;
       }
+      const sid = await getSessionId(machineId);
+      if (cancelled) return;
       setMachine(m);
+      setInitialSession(sid ?? '');
+      setSessionLoaded(true);
     })();
     return () => {
       cancelled = true;
@@ -172,8 +227,18 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
       const msg = JSON.parse(event.nativeEvent.data);
       if (msg.type === 'ready') setStatus(`connected · ${msg.cols}×${msg.rows}`);
       else if (msg.type === 'closed') setStatus(`closed (${msg.code})`);
+      else if (msg.type === 'reconnecting') setStatus('reconnecting…');
       else if (msg.type === 'error') setError(msg.message ?? 'error');
       else if (msg.type === 'size') setStatus(`connected · ${msg.cols}×${msg.rows}`);
+      else if (msg.type === 'session') {
+        // Persist so a full app restart can resume the same shell.
+        void setSessionId(machineId, msg.id);
+        setStatus(msg.resumed ? 'resumed session' : 'new session');
+      } else if (msg.type === 'exit') {
+        // Shell ended — drop the stored id so next open starts fresh.
+        void clearSessionId(machineId);
+        setStatus('session ended');
+      }
     } catch {
       /* malformed postMessage — ignore */
     }
@@ -191,7 +256,7 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
     );
   }
 
-  if (!machine) {
+  if (!machine || !sessionLoaded) {
     return (
       <View style={styles.root}>
         <Header onBack={onBack} status={status} />
@@ -211,6 +276,7 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
     cwd,
     cols: 80,
     rows: 24,
+    session: initialSession,
   });
 
   return (
@@ -239,9 +305,11 @@ export function TerminalScreen({ machineId, onBack }: TerminalScreenProps) {
           }
           mixedContentMode="always"
           javaScriptCanOpenWindowsAutomatically={false}
-          // Remount on machine change or cwd change so the IIFE re-reads the
-          // placeholders with the latest values.
-          key={`${machine.id}|${cwd}`}
+          // Keyed by machine only (not cwd) so the terminal is stable — it must
+          // NOT remount/reset when backgrounded or when the cwd field changes;
+          // the session persists and reconnects itself. cwd is the initial
+          // launch dir, read once at mount.
+          key={machine.id}
         />
       </View>
     </View>

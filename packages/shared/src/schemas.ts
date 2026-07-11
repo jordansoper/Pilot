@@ -91,6 +91,12 @@ export const PtyHelloQuerySchema = z.object({
     .regex(/^[a-z0-9-]+$/, 'tool id must match /^[a-z0-9-]+$/'),
   /** Optional model name (used by `ollama run <model>`). */
   model: z.string().min(1).max(100).optional(),
+  /**
+   * Existing session id to re-attach to (kept alive on the daemon across
+   * disconnects). Omitted/unknown → a fresh session is created and its id is
+   * returned to the client. UUID v4.
+   */
+  session: z.string().uuid().optional(),
   /** Initial PTY columns. */
   cols: z.coerce.number().int().positive().max(1000).default(80),
   /** Initial PTY rows. */

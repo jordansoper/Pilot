@@ -70,7 +70,7 @@ export async function removeMachine(id: string): Promise<void> {
  * pairing is stuck with a stale token.
  */
 export async function resetApp(): Promise<void> {
-  await AsyncStorage.multiRemove([STORAGE_KEY]);
+  await AsyncStorage.multiRemove([STORAGE_KEY, SESSION_KEY]);
 }
 
 export async function setLastSeen(id: string, lastSeenMs: number | null): Promise<void> {
@@ -79,6 +79,48 @@ export async function setLastSeen(id: string, lastSeenMs: number | null): Promis
   if (i < 0) return;
   const next = machines.map((m, idx) => (idx === i ? { ...m, lastSeenMs } : m));
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+}
+
+const SESSION_KEY = '@pilot/sessions/v1';
+
+/** Read the persistent terminal session id for a machine (survives app restart). */
+export async function getSessionId(machineId: string): Promise<string | null> {
+  const raw = await AsyncStorage.getItem(SESSION_KEY);
+  if (!raw) return null;
+  try {
+    const map = JSON.parse(raw);
+    const v = map?.[machineId];
+    return typeof v === 'string' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeSessionMap(mut: (m: Record<string, string>) => void): Promise<void> {
+  const raw = await AsyncStorage.getItem(SESSION_KEY);
+  let map: Record<string, string> = {};
+  try {
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') map = parsed;
+    }
+  } catch {
+    /* start fresh on corrupt json */
+  }
+  mut(map);
+  await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(map));
+}
+
+export async function setSessionId(machineId: string, sessionId: string): Promise<void> {
+  await writeSessionMap((m) => {
+    m[machineId] = sessionId;
+  });
+}
+
+export async function clearSessionId(machineId: string): Promise<void> {
+  await writeSessionMap((m) => {
+    delete m[machineId];
+  });
 }
 
 /** Record which host last answered, so it's tried first and used for the terminal. */

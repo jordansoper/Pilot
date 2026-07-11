@@ -3,7 +3,6 @@ import process from 'node:process';
 import type { Duplex } from 'node:stream';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
-import type { IPty } from 'node-pty';
 import {
   HEALTH_PATH,
   PROTOCOL_VERSION,
@@ -16,6 +15,7 @@ import {
 import { checkBearer } from './auth.js';
 import { getLauncher } from './launchers.js';
 import { buildPairingPageHtml, type PairingAddress } from './pairing-page.js';
+import { SessionManager } from './sessions.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
@@ -112,10 +112,11 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   }, HEARTBEAT_INTERVAL_MS);
   wss.on('close', () => clearInterval(heartbeat));
 
+  const sessions = new SessionManager();
   wss.on('connection', (ws: WebSocket, req) => {
     live.set(ws, true);
     ws.on('pong', () => live.set(ws, true));
-    handlePtyConnection(ws, req);
+    handlePtyConnection(ws, req, sessions);
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -132,6 +133,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     close: () =>
       new Promise<void>((resolve) => {
         clearInterval(heartbeat);
+        sessions.closeAll();
         for (const client of wss.clients) client.terminate();
         wss.close();
         httpServer.close(() => resolve());
@@ -310,7 +312,20 @@ function parseResize(raw: string): ResizeMessage | null {
   return null;
 }
 
-function handlePtyConnection(ws: WebSocket, req: IncomingMessage): void {
+/** Send a JSON control frame as BINARY so the client can tell it from PTY text. */
+function sendControl(ws: WebSocket, obj: unknown): void {
+  try {
+    ws.send(Buffer.from(JSON.stringify(obj), 'utf8'), { binary: true });
+  } catch {
+    /* socket already gone */
+  }
+}
+
+function handlePtyConnection(
+  ws: WebSocket,
+  req: IncomingMessage,
+  mgr: SessionManager,
+): void {
   const hello = queryCache.get(req);
   if (!hello) {
     ws.close(1011, 'missing handshake');
@@ -322,23 +337,24 @@ function handlePtyConnection(ws: WebSocket, req: IncomingMessage): void {
     return;
   }
 
-  let term: IPty;
+  let attached: {
+    session: ReturnType<SessionManager['createOrAttach']>['session'];
+    resumed: boolean;
+  };
   try {
-    term = launcher.spawn({ cwd: hello.cwd, cols: hello.cols, rows: hello.rows }, hello);
+    attached = mgr.createOrAttach(hello, launcher, {
+      cwd: hello.cwd,
+      cols: hello.cols,
+      rows: hello.rows,
+    });
   } catch (err) {
-    try {
-      ws.send(
-        JSON.stringify({
-          type: 'exit',
-          protocol: PROTOCOL_VERSION,
-          exitCode: -1,
-          signal: null,
-          error: err instanceof Error ? err.message : String(err),
-        }),
-      );
-    } catch {
-      /* socket already gone */
-    }
+    sendControl(ws, {
+      type: 'exit',
+      protocol: PROTOCOL_VERSION,
+      exitCode: -1,
+      signal: null,
+      error: err instanceof Error ? err.message : String(err),
+    });
     try {
       ws.close(1011, 'spawn failed');
     } catch {
@@ -346,82 +362,72 @@ function handlePtyConnection(ws: WebSocket, req: IncomingMessage): void {
     }
     return;
   }
+  const { session, resumed } = attached;
+  session.owner = ws;
+  session.attached = true;
 
-  // Settle-once flag so the "client closed → process exits → onExit sends
-  // JSON after ws.close" path can't throw and crash the daemon.
-  let closed = false;
-  const finishFromProcess = (payload: { exitCode: number; signal: number | null }) => {
-    if (closed) return;
-    closed = true;
+  // The block below is synchronous — no awaits — so no live PTY output (which
+  // fires on a later tick) can interleave before the scrollback replay.
+  sendControl(ws, {
+    type: 'session',
+    protocol: PROTOCOL_VERSION,
+    id: session.id,
+    resumed,
+  });
+  if (resumed && session.buffer) {
     try {
-      ws.send(JSON.stringify({ type: 'exit', protocol: PROTOCOL_VERSION, ...payload }));
+      ws.send(session.buffer);
     } catch {
       /* socket already gone */
     }
+  }
+  session.sink = (data: string) => {
+    try {
+      ws.send(data);
+    } catch {
+      /* socket already gone */
+    }
+  };
+  session.onExit = (payload) => {
+    sendControl(ws, { type: 'exit', protocol: PROTOCOL_VERSION, ...payload });
     try {
       ws.close(1000, 'pty exited');
     } catch {
       /* already closed */
     }
-    live.delete(ws);
   };
-  const finishFromClient = () => {
-    if (closed) return;
-    closed = true;
-    try {
-      term.kill();
-    } catch {
-      /* already dead */
-    }
-    live.delete(ws);
-  };
-
-  const safeWrite = (data: string | Buffer) => {
-    if (closed) return;
-    try {
-      term.write(data);
-    } catch {
-      finishFromProcess({ exitCode: -1, signal: null });
-    }
-  };
-
-  // node-pty's onData delivers a stringified PTY output chunk.
-  term.onData((data: string) => {
-    if (closed) return;
-    try {
-      ws.send(data);
-    } catch {
-      finishFromProcess({ exitCode: -1, signal: null });
-    }
-  });
-
-  term.onExit((event: { exitCode: number; signal?: number }) => {
-    finishFromProcess({
-      exitCode: event.exitCode,
-      signal: event.signal ?? null,
-    });
-  });
 
   ws.on('message', (data: RawData, isBinary) => {
-    if (closed) return;
     if (isBinary) {
-      safeWrite(rawToBuffer(data));
+      try {
+        session.term.write(rawToBuffer(data));
+      } catch {
+        /* pty gone */
+      }
       return;
     }
     const text = typeof data === 'string' ? data : rawToBuffer(data).toString('utf8');
     const control = parseResize(text);
     if (control) {
       try {
-        term.resize(control.cols, control.rows);
+        session.term.resize(control.cols, control.rows);
       } catch {
-        /* resize after exit — discard silently */
+        /* resize after exit — discard */
       }
       return;
     }
-    safeWrite(Buffer.from(text, 'utf8'));
+    try {
+      session.term.write(Buffer.from(text, 'utf8'));
+    } catch {
+      /* pty gone */
+    }
   });
 
   ws.on('close', () => {
-    finishFromClient();
+    live.delete(ws);
+    // Detach only — the shell keeps running so the client can re-attach and
+    // resume. Guard against a stale socket detaching a session that a newer
+    // client has already taken over.
+    if (session.owner === ws) mgr.detach(session);
   });
 }
