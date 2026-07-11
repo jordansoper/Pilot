@@ -49,12 +49,17 @@ Phase 2).
 - Android Studio + an emulator or device (Phase 1+)
 - Tailscale on dev machine + phone (Phase 1+)
 
-## Phase status
+## Status
 
-- ✅ **Phase 0 — Scaffold** (you are here)
-- ⏳ Phase 1 — Vertical slice: pair one machine → bash terminal over Tailscale
-- ⏳ Phase 2 — File picker + Claude Code launch
-- ⏳ Phase 3 — Multi-machine
-- ⏳ Phase 4 — Freebuff + Ollama launchers
-- ⏳ Phase 5 — Daemonization & polish
-- ⏳ Phase 6 — Desktop app (macOS + Windows): fully self-contained, single-installer GUI (bundles its own Node + node-pty, no system deps) wrapping the daemon — pairing QR, settings, folder-access config, run-at-login
+See [`PROJECT_PLAN.md`](./PROJECT_PLAN.md) §7 for the full roadmap. In short:
+
+**Done** — pair (one QR, LAN + Tailscale), persistent `bash` terminal that
+survives backgrounding, multiple concurrent sessions per machine with a session
+picker, folder picker for new sessions, multi-machine, settings/reset, back nav.
+
+**Next**
+
+- ⏳ **Phase A — AI tool launchers** (freebuff / Claude Code / ollama) + `/api/tools` + a tool picker. *The top priority — today it only launches `bash`.*
+- ⏳ Phase B — Terminal UX polish (Ctrl/Alt key toolbar, copy/paste, bundle xterm.js offline)
+- ⏳ Phase C — CLI daemonization for headless servers (`pilot install`)
+- ⏳ Phase D — Desktop app (macOS + Windows): self-contained, signed, single-installer GUI wrapping the daemon (scaffolded in `packages/desktop`)

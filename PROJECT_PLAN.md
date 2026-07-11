@@ -1,271 +1,172 @@
-# Project Plan — Remote CLI Connector
+# Project Plan — Pilot
 
-> Companion to `Remote cli tool android.md`. The spec's goal: a cross-platform CLI tool that pairs with an Android app so you can browse folders on your computer from your phone and launch AI CLIs (Freebuff, Claude Code, Ollama) against them in a chat-shaped interface. Multiple machines.
+> Pair your phone with your dev machines and run AI CLIs (and any shell) on
+> them from anywhere. The computer runs a small daemon; the Android app is a
+> remote terminal into it, reachable over your local Wi-Fi or over Tailscale.
+>
+> This document reflects **what is actually built today** and the roadmap from
+> here. For per-OS gotchas and the manual acceptance checklist see
+> [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md); for a file-by-file audit see
+> [`BUILD_STATUS.md`](./BUILD_STATUS.md).
 
-## 1. Decisions Locked In
+## 1. What Pilot is
 
-| Area | Choice | Why |
+A **daemon** (`pilot-cli`) runs on each computer you want to reach. A phone app
+(`pilot-app`) pairs with it by scanning a QR code, then opens a terminal
+(xterm.js) that streams a real PTY over a WebSocket. The shell lives on the
+computer; the phone is a faithful, reconnecting view of it.
+
+The eventual point is launching **AI CLIs** — freebuff, Claude Code, ollama —
+in a chosen project folder from your phone. Today the plumbing is done and it
+launches `bash`; the AI-tool launchers are the next step (§7).
+
+## 2. Decisions locked in
+
+| Area | Choice | Notes |
 |---|---|---|
-| Transport | **Tailscale (with SSH-tunnel fallback)** | No central server to operate. Flat private network, encrypted, works behind any NAT. Android Tailscale client exists. |
-| CLI tool | **Bun + TypeScript**, single binary | Fast iteration, first-class HTTP/WS, `--compile` for shipping. |
-| Android app | **React Native + Expo** | UI is webby (lists, pickers, chat). xterm.js lives in a WebView. |
-| v1 scope | **Thin vertical slice** | Pair one computer → pick a folder → launch Claude Code → terminal/chat in the app. |
-| v1 chat UI | **xterm.js inside RN WebView**, piped over WebSocket | Claude Code is a TUI, not a chat API. Trying to parse its ANSI into chat bubbles is a losing game. |
+| Transport | **Tailscale + LAN**, no central server | Everything runs inside the user's own network. One pairing QR carries both the Tailscale IP and the LAN IP; the app uses whichever answers. |
+| CLI runtime | **Node ≥ 20 + TypeScript** | Runs via `tsx` in dev, `node dist` in prod. (Bun was the original plan; Node won for `node-pty` stability.) |
+| Android app | **React Native + Expo** (Android-first) | UI is lists/pickers + xterm.js in a `react-native-webview`. |
+| Desktop app | **Electron** (`packages/desktop`) | Wraps the daemon in a window; scaffolded, not yet self-contained. §7 Phase D. |
+| Terminal UI | **xterm.js in a WebView over WebSocket** | TUIs (Claude Code, etc.) are streamed faithfully as ANSI, not parsed into chat bubbles. |
+| Sessions | **Persistent, server-side** | The PTY survives disconnects; the app re-attaches by id and replays scrollback. |
 
-## 2. Non-Goals for v1
-
-- iOS build (Android only while we prove the loop).
-- Public/internet-exposed access. Tailscale-only.
-- Native RN chat-bubble UI for CLIs that are TUIs. Terminal emulator wins.
-- Auto-update, crash reporting, telemetry beyond a basic logger.
-- Encrypted-at-rest session history (we'll keep in-memory + temp files only v1).
-
-## 3. Architecture (v1)
+## 3. Architecture (as built)
 
 ```
-┌──────────────────────────┐                ┌──────────────────────────┐
-│  Android Phone           │   Tailscale    │  Developer Machine       │
-│  ┌────────────────────┐  │   (WireGuard)  │  ┌────────────────────┐  │
-│  │ Expo App (RN)      │──┼────────────────┼──│ Bun CLI (daemon)   │  │
-│  │  - Computer list   │  │   HTTP / WS    │  │  - HTTP /api/fs    │  │
-│  │  - File picker     │  │   over         │  │  - WS /ws/pty      │  │
-│  │  - AI picker       │  │   ts-net       │  │  - node-pty        │  │
-│  │  - xterm.js WebView│  │                │  │     └─> claude,    │  │
-│  └────────────────────┘  │                │  │         freebuff,   │  │
-│  Tailscale Android app ──┼────────────────┼──│         ollama,     │  │
-│  (gives phone a 100.x)   │                │  │         bash…       │  │
-└──────────────────────────┘                │  └────────────────────┘  │
-                                            │  Claude Code installed?  │
-                                            └──────────────────────────┘
+┌──────────────────────────┐      LAN (same Wi-Fi)      ┌──────────────────────────┐
+│  Android phone           │  ───── direct, fast ─────  │  Computer (Mac/Win/Linux)│
+│  ┌────────────────────┐  │                            │  ┌────────────────────┐  │
+│  │ Expo app           │  │   ── or ── Tailscale ───   │  │ pilot-cli (daemon) │  │
+│  │  Machines          │──┼─────── (WireGuard) ────────┼──│  HTTP + WS on :7117 │  │
+│  │  Sessions picker   │  │   HTTP  /api/health         │  │  SessionManager    │  │
+│  │  Folder picker     │  │   HTTP  /api/sessions       │  │   └─ node-pty ×N   │  │
+│  │  Terminal (xterm)  │  │   HTTP  /api/fs             │  │  loopback pair page │  │
+│  └────────────────────┘  │   WS    /ws/pty (attach)    │  │  ~/.pilot/token     │  │
+└──────────────────────────┘                            │  └────────────────────┘  │
+                                                        └──────────────────────────┘
 ```
 
-**Flow under Tailscale:**
-1. User installs Tailscale on the phone + dev machine, logs into the same tailnet.
-2. User runs the CLI on the dev machine. CLI prints a `tailscale ip` + port + a fresh token + a **QR code** containing `pilot://pair?host=100.x.y.z&port=7117&token=…`.
-3. Android app scans QR → saves the machine as "paired".
-4. App fetches `/api/fs?path=…` over Tailscale to browse folders.
-5. User picks a folder + AI tool. App opens WS to `/ws/pty?cwd=…&tool=claude`.
-6. CLI spawns the AI CLI via `node-pty` with chosen `cwd`. Bytes flow over WS to xterm.js in the app.
+One QR pairs the machine. From then on the phone talks HTTP/WS directly to the
+daemon over whichever path is up. No relay, no accounts, no server we operate.
 
-## 4. Components
+## 4. Repo layout
 
-### 4.1 `pilot-cli` (Bun + TypeScript)
-
-A daemon the user runs on every machine they want to expose.
-
-Responsibilities:
-- Print a Tailscale IP and QR on startup.
-- Serve `GET /api/fs?path=…` → `{ entries: [{ name, type, size, mtime }] }`. No write endpoints v1.
-- Serve `GET /api/health` → version, uptime, detected AI tools installed.
-- Serve `GET /api/tools` → list of AI launchers detected.
-- Serve `WS /ws/pty?cwd&tool&cols&rows` → spawn the process via `node-pty`, pipe both directions.
-- Run with `--port 7117` (default), `--bind 127.0.0.1` (Tailscale handles routing), `--no-qr` (headless).
-- Auth: every request must present `Authorization: Bearer <token>` matching the token from the most recent startup QR.
-
-Native deps:
-- **node-pty** (PTY bridging)
-- **qrcode-terminal** (QR for pairing)
-- Optional: **@lydell/node-pty-prebuilt-multiarch** if `node-pty` prebuilts prove flaky. Decision noted in §7 risks.
-
-### 4.2 `pilot-app` (Expo / React Native)
-
-Screens (rough):
-1. **Machines** — list of saved pairings, online/offline indicator, "+" FAB to add.
-2. **Add Machine** — QR scanner (uses `expo-barcode-scanner` / `expo-camera`).
-3. **File Picker** — tree fetched from `/api/fs`. Tap to enter folder. Long-press or tap ✓ to confirm.
-4. **Tool Picker** — chips / list for claude, freebuff, ollama (only ones the CLI reported installed).
-5. **Terminal** — a `react-native-webview` hosting `xterm.js`, pointing its `Terminal` at a `WebSocket` to `/ws/pty`.
-
-State: AsyncStorage for paired machines. Tiny, no DB v1.
-
-### 4.3 No central server
-
-The whole product works inside the user's tailnet. There is no relay we operate. This is a major simplification: no accounts, no billing, no rate limiting, no GDPR surface. The price is requiring Tailscale as a precondition.
-
-If that proves too heavy for users later, swap transport to a relay + WebRTC. The CLI+app contract (REST `/api/fs`, WS `/ws/pty`) is transport-agnostic, so this is a localized change.
-
-## 5. Repos / Repo Layout
-
-Monorepo so dev loops are simple. **pnpm workspaces** (works fine with Bun).
+pnpm monorepo (`node-linker=hoisted` — required for Expo/RN native builds):
 
 ```
 pilot/
 ├── packages/
-│   ├── cli/                 # pilot-cli (Bun, builds to ./dist/pilot)
-│   ├── app/                 # pilot-app (Expo)
-│   └── shared/              # zod schemas + TS types shared by CLI & app
-├── examples/
-│   └── dev-tailscale-setup.md
-├── pnpm-workspace.yaml
-├── package.json
-└── PROJECT_PLAN.md           # this file
+│   ├── shared/     # zod schemas + TS types — the single source of truth for the wire contract
+│   ├── cli/        # pilot-cli daemon (Node + TS): server, sessions, launchers, pairing, token
+│   ├── app/        # pilot-app (Expo / React Native, Android)
+│   └── desktop/    # pilot-desktop (Electron scaffold) — launches the daemon + shows the QR
+├── scripts/        # postinstall fixups (node-pty perms, Android prebuild patches)
+├── PROJECT_PLAN.md · BUILD_STATUS.md · TROUBLESHOOTING.md
 ```
 
-`shared` exports:
-- `PairingPayload` (zod): `{ version: 1, host, port, token, name }`
-- `FsEntry`, `ToolInfo`, `PtyHello`
-- Constants: `DEFAULT_PORT = 7117`, `WS_PATH = "/ws/pty"`, `FS_PATH = "/api/fs"`.
+## 5. Wire contract (implemented)
 
-## 6. Pairing & Security
+All under `http://<host>:7117`, `Authorization: Bearer <token>` on everything
+except the loopback pairing page. Schemas live in `@pilot/shared`.
 
-**v1 threat model:** an attacker who is *already on your tailnet* can drive your CLI. That's the bar. Tailscale ACLs are responsible for keeping strangers out; the per-session token is responsible for keeping other tailnet devices from impersonating your phone.
+| Endpoint | Status | Purpose |
+|---|---|---|
+| `GET /` (and `/pair`) | ✅ | Loopback-only HTML pairing page with a crisp SVG QR + the addresses it covers. 404 to non-loopback (the QR carries the token). |
+| `GET /api/health` | ✅ | `{ version, uptimeMs, tailscaleIp, port }` — drives the online dot. |
+| `GET /api/sessions` | ✅ | `{ sessions: [{ id, cwd, tool, createdMs, attached }] }` — the session picker. |
+| `GET /api/fs?path=` | ✅ | `{ path, entries: [{ name, type }] }`. Allowlist rooted at `$HOME` (or `PILOT_FS_ROOT`); path-escape → 400. |
+| `WS /ws/pty?cwd&tool&cols&rows[&session]` | ✅ | Bidirectional PTY. `session=<uuid>` re-attaches to a live session; otherwise a new one is created and its id is returned. Session/exit are **binary** control frames; PTY bytes are text. |
+| `GET /api/tools` | ⛔ **not built** | Will report which launchers are installed. Blocks the tool picker (§7 Phase A). |
 
-**Pairing flow:**
-1. CLI generates a 32-byte token (`crypto.randomBytes`) on startup, prints a QR-encoded `pilot://pair?…` URL, and accepts a `--insecure-no-token` flag only for `pnpm dev` on localhost.
-2. App scans QR, validates `PairingPayload` with zod, stores `{ id, name, host, port, token }` in AsyncStorage.
-3. All HTTP/WS calls include `Authorization: Bearer <token>`. CLI rejects mismatches with 401.
-4. Tokens rotate on every CLI restart. App detects 401 → marks machine offline + prompts re-pair.
-5. **No token ever leaves the tailnet.** QR contains plaintext token; this is fine because the QR is over-the-shoulder only, and the whole transport is already encrypted by WireGuard.
+## 6. Pairing, sessions & security
 
-## 7. AI Launcher Abstraction
+**Pairing.** The daemon persists a 32-byte token at `~/.pilot/token` (0600) and
+**reuses it across restarts** — pair once, it sticks. `pilot --rotate-token`
+revokes and forces a re-pair. The QR encodes `{ version, host, hosts[], port,
+token, name }`; `hosts[]` carries every reachable address so one code works on
+LAN and Tailscale. The nicest way to pair is opening `http://localhost:7117/`
+on the computer and scanning the on-screen QR.
 
-A v1 launcher is just `{ id, bin, args, cwd, env, label, detectCommand }`.
+**Sessions.** `SessionManager` owns each PTY plus a 256 KB scrollback ring. A
+dropped socket **detaches** (the shell keeps running); the app reconnects with
+backoff and re-attaches by id, and the daemon replays the buffer — you land
+where you left off (Termux-style). Detached sessions are reaped after 30 min
+idle or on shell exit (max 24). Multiple sessions per machine run concurrently.
 
-Hardcoded in v1 (in `packages/cli/src/launchers/`):
-- `claude` → `["claude"]`, detect via `which claude`
-- `freebuff` → `["freebuff"]`, detect via `which freebuff` (placeholder until freebuff ships a CLI)
-- `ollama-run` → `["ollama", "run", "<model>"]`, with `<model>` asked from user at tool-picker time
-- `bash` → `["bash"]` (don't ship without this — needed to verify the PTY plumbing independently of any AI tool)
+**Threat model.** Anyone already on your tailnet/LAN who has the token can drive
+the daemon; Tailscale ACLs / your LAN keep strangers out, the bearer token keeps
+other devices from impersonating your phone. Cleartext HTTP is used **inside**
+the already-encrypted Tailscale/LAN path (the Android release build must opt in
+via `usesCleartextTraffic` — see TROUBLESHOOTING §5); a tighter network-security
+config scoped to the tailnet + LAN is a future hardening (§7).
 
-Each launcher is invoked inside a `node-pty` with `cwd = user-picked folder`. We do **not** try to parse the process output into structured chat messages. We just stream ANSI to xterm.js. v1 wins by routing TUIs faithfully.
+## 7. Roadmap
 
-## 8. APIs (v1 contract)
+Status legend: ✅ done · 🟡 partial · ⛔ not started.
 
-All under `http://<tailscale-ip>:7117`. Authorization header everywhere.
+### Done (the working core)
 
-- `GET /api/health` → `{ version, uptimeMs, tailscaleIp, port }`
-- `GET /api/tools` → `{ tools: [{ id, label, available }] }`
-- `GET /api/fs?path=<absolute>` → `{ path, entries: [{ name, type: 'dir'|'file', size?, mtime? }] }`. 400 if `path` outside an allowlist rooted at `$HOME` (v1 safety net).
-- `WS /ws/pty?cwd&tool[&model][&cols&rows]` → bidirectional PTY.
+- ✅ **Scaffold + CI** — pnpm monorepo, shared zod contract, typecheck/lint/test gates.
+- ✅ **Vertical slice** — pair → persistent `bash` terminal, verified end-to-end on a real phone over both LAN and Tailscale.
+- ✅ **Multi-machine** — the app stores N machines; delete asks for confirmation.
+- ✅ **One-QR LAN + Tailscale** — app auto-selects the reachable address and shows which it used.
+- ✅ **Persistent sessions** — background/return resumes the same shell with scrollback.
+- ✅ **Multiple sessions per machine** — session picker: attach to a running shell or start a new one.
+- ✅ **Folder picker** — browse the machine's dirs (`$HOME` allowlist) to choose where a new session launches.
+- ✅ **Settings + Reset app**, back navigation (incl. Android hardware back), status-bar layout fix.
 
-If we change any of these in v2 they only change inside `packages/shared`, both repos consume the zod schemas. Single source of truth.
+### Phase A — AI tool launchers (highest priority; delivers the original goal)
 
-## 9. Phases
+Right now only `bash` is registered. This is the step that makes Pilot *Pilot*.
 
-### Phase 0 — Scaffold (½ day)
-- pnpm workspace, `shared` package with zod schemas, empty `cli` + `app` packages that import from `shared`.
-- CI: typecheck (`tsc --noEmit`), lint (`eslint`), test (`vitest` for `shared`).
+- `cli`: register `claude`, `freebuff`, `ollama` launchers (each = binary + args + a `which`-style detection); implement `GET /api/tools`.
+- `app`: a **tool picker** in the new-session flow (after the folder picker). `ollama` also needs a model input.
+- Verify Claude Code's interactive first-run auth completes inside the PTY.
 
-### Phase 1 — Vertical slice, `bash` over Tailscale (the proof)
-**Acceptance:** with Tailscale set up on phone+laptop, scanning the QR pairs the machine, tapping it opens a terminal running `bash`, typing `ls` twice returns output. No file picker, no AI yet.
+### Phase B — Terminal UX polish
 
-Deliverables:
-- `cli`: QR startup, `/api/health`, `/ws/pty` running `bash` via `node-pty`, bearer auth.
-- `app`: Add Machine (QR scan), Machines list, Terminal screen with xterm.js WebView.
-- `examples/dev-tailscale-setup.md` — 60-second Tailscale setup recipe for new contributors.
+- A **Ctrl / Alt / Esc / arrows** key toolbar above the terminal (these are painful on a phone keyboard).
+- Copy/paste, and IME/height handling.
+- **Bundle xterm.js** instead of loading it from a CDN, so the terminal works with no internet (pure tailnet/LAN).
+- Session niceties: kill/rename a session from the app; configurable idle timeout.
 
-This phase exists to kill the Bun+node-pty risk in isolation.
+### Phase C — CLI daemonization (headless)
 
-### Phase 2 — File picker + Claude Code
-- `cli`: `/api/fs`, allowlist, `/api/tools` with claude detection.
-- `app`: File Picker screen, Tool Picker screen (Claude only).
-- Launch `claude` in picked `cwd`.
+- `pilot install` → LaunchAgent / systemd user unit / Windows Scheduled Task, so servers run the daemon at login. (Interactive desktops get this from Phase D instead.)
+- Crash logs to `~/.pilot/log.jsonl`.
 
-### Phase 3 — Multi-machine
-- App stores N machines, supports re-pair, shows offline on 401.
-- CLI supports `--name "workstation-b"` so QR embeds a friendly name.
+### Phase D — Desktop app (macOS + Windows; Linux best-effort)
 
-### Phase 4 — More tools
-- `freebuff` launcher (gated on Freebuff's CLI landing).
-- `ollama run <model>` launcher with model picker in app.
+Make `packages/desktop` a real, **self-contained** app so a non-technical user
+never touches a terminal.
 
-### Phase 5 — Daemonization & polish
-- Optional `--install` flag on CLI: creates systemd user unit / LaunchAgent / Windows Scheduled Task. Sensible defaults; idempotent.
-- Reconnect + keepalive on the WS.
-- Tabs / multiple simultaneous sessions in app.
-- Crash logs to disk on CLI side.
+- **Today:** an Electron scaffold that spawns the daemon as a child process and shows the loopback pairing page in a window. Needs a Mac with a display to launch (the scaffold uses the system `node`).
+- **To finish:** bundle its own Node runtime + `node-pty` (electron-rebuild) so no system Node is needed; tray / menu-bar lifecycle with run-at-login; a settings panel (port, name, **bind-to-Tailscale-IP by default**); a folder-access GUI for the FS allowlist; tool toggles; then **code-signing + notarization** and a single installer per OS (`.dmg`/`.pkg`, `.exe`/MSI, AppImage/`.deb`).
+- **Watch out for:** the `node-pty` ABI under Electron, and port-7117 conflicts with a manually-run daemon (detect, don't crash on `EADDRINUSE`).
+- **Done =** on a clean machine with no Node/pnpm/repo, install the signed app, launch it, toggle run-at-login, open the QR, add an allowed folder, and pair + drive a session from the phone — Tailscale the only other thing installed.
 
-### Phase 6 — Desktop app (macOS + Windows, Linux best-effort)
+### Later / bigger picture
 
-**Goal:** a double-click, launchable desktop app that wraps `pilot-cli` so a
-non-technical user never touches a terminal. It runs the daemon in the
-background, lives in the menu bar / system tray, and gives a real UI for the
-things you currently do with flags and env vars: pairing QR, settings, and
-folder access. The CLI stays the source of truth for the wire protocol; the
-desktop app is a front-end that manages a daemon, not a reimplementation.
+- **iOS app** — the codebase is Expo, so mostly a build target + UI testing away.
+- **Tighter security** — network-security-config scoped to tailnet + LAN instead of blanket cleartext; an in-app "rotate token" button.
+- **Transport fallback** — if Tailscale-as-a-prerequisite ever blocks adoption, add a relay + WebRTC path. The REST/WS contract is transport-agnostic, so this is localized.
 
-**Hard requirement — fully self-contained, zero external dependencies.** The
-end user installs *one* app and nothing else. No system Node, no pnpm, no repo
-checkout, no `corepack`, no terminal step (installing pnpm-via-corepack, the
-`--bind 0.0.0.0` flag, `start:dev` vs `dev` — every rough edge from getting the
-daemon running by hand goes away). The app **bundles its own Node runtime and
-the `node-pty` native module** (this is the main reason Electron is chosen over
-a spawn-a-system-node design) and ships as a single signed installer per OS:
-`.dmg`/`.pkg` (macOS), `.exe`/MSI (Windows), AppImage/`.deb` (Linux
-best-effort). Tailscale remains the one external prerequisite (it's the
-transport); everything else Pilot needs travels inside the app bundle.
+## 8. Known constraints & gotchas
 
-**Why this is its own phase:** it's a new deliverable (a third client after
-`cli` and `app`), it introduces desktop packaging/code-signing/notarization
-work, and it should only start once the daemon's surface (Phases 2–4: `/api/fs`
-allowlist, `/api/tools`, launchers) is stable enough to expose in a GUI.
+These bit us and are documented in [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md):
 
-**Scope (v1 of the desktop app):**
-- **Launch & lifecycle.** Menu-bar (macOS) / system-tray (Windows) icon with
-  Start/Stop, "run at login" toggle, and a status line (running/stopped,
-  Tailscale up/down, N connected clients). Supersedes Phase 5's OS-level
-  daemonization for interactive desktops; the CLI `--install` path stays for
-  headless/Linux servers.
-- **Pairing QR window.** Render the `pilot://pair` QR in a real window (not
-  ASCII), with a "copy pair URL" button and a "regenerate token / re-pair"
-  action. Shows which machine name + Tailscale IP it's advertising.
-- **Settings.** Port, machine name, and **which interface to bind** — default
-  to the discovered Tailscale IP (this is where the loopback-vs-Tailscale bind
-  footgun gets solved with a sane default and an explanation, not a flag).
-- **Folder access.** A GUI for the FS allowlist (Phase 2's `$HOME` /
-  `PILOT_FS_ROOT`): add/remove allowed root folders via a native folder
-  picker, so the phone can only browse what the user has granted. Closes the
-  §11 "Filesystem scope" open question for the desktop case.
-- **Tool toggles.** Enable/disable launchers (bash / claude / freebuff /
-  ollama) and show which were auto-detected as installed.
-- **Self-contained packaging.** One installer per OS with the Node runtime and
-  `node-pty` prebuilt inside; installs to Applications / Start menu; first
-  launch works on a machine that has never had Node or pnpm. No repo, no
-  build step for the end user.
+- **Default bind is `127.0.0.1`** — the phone can't reach loopback; run with `--bind 0.0.0.0` (the desktop app and the recommended commands already do). Making bind-to-Tailscale-IP the default is a Phase D item.
+- **Android release builds block cleartext HTTP by default** — Pilot's build patches `usesCleartextTraffic=true` into the manifest (safe: the transport is already encrypted). This was the cause of a long "always offline" chase.
+- **pnpm + `node-pty`** — the store drops the `+x` bit on the prebuilt `spawn-helper`; a `postinstall` restores it.
+- **Expo + pnpm Android builds** need `node-linker=hoisted` plus post-prebuild patches (gradle-plugin resolution, splash color, cleartext) applied by `scripts/patch-android-prebuild.mjs`.
+- **Use `start:dev`/`start`, not `dev`** for a long-running daemon — `tsx watch` restarts on workspace rebuilds.
 
-**Tech decision — Electron (primary), Tauri (noted alternative).** The daemon
-is already Node + native `node-pty`, so an Electron main process can import and
-run the existing `startServer()` from `@pilot/cli` in-process and reuse the
-`@pilot/shared` zod schemas and even React components. Tauri would give much
-smaller binaries but forces the daemon to run as a spawned Node sidecar and
-adds a Rust toolchain — revisit only if bundle size becomes a real complaint.
-Lands as a new `packages/desktop/` in the monorepo.
+## 9. What "great" looks like
 
-**Risks specific to this phase:**
-- **Code-signing & notarization.** macOS Gatekeeper needs a Developer ID +
-  notarization; Windows needs an Authenticode cert or users hit SmartScreen.
-  This is paperwork + CI work, not code — budget for it.
-- **Bundling `node-pty`.** The native module must be packaged per-arch
-  (electron-builder + the same prebuild/spawn-helper care as the CLI — see the
-  `spawn-helper` execute-bit issue in TROUBLESHOOTING §3).
-- **Two things that manage a daemon.** Make sure the desktop app and a manually
-  run `pilot-cli` don't fight over port 7117 — detect and surface a conflict
-  rather than crashing with `EADDRINUSE`.
-
-**Definition of done:** on a clean Mac and a clean Windows box **with no Node,
-pnpm, or repo checkout present**, install the signed app from a single
-installer, launch it from the Applications list / Start menu, toggle "run at
-login", open the QR window, add an allowed folder, and pair + drive a `bash`
-session from the phone — all without opening a terminal or installing anything
-besides Tailscale.
-
-## 10. Risks (top 3)
-
-1. **`node-pty` native compilation across Win/Mac/Linux from Bun** — historically flaky. **Mitigation:** prove Phase 1 on all 3 OSes on day 1. If Bun-side fails, fall back to `@lydell/node-pty-prebuilt-multiarch` or ship Node 20 LTS instead. The whole project hinges on this so we don't move on to Phase 2 until it works everywhere.
-2. **Terminal UX inside a React Native WebView** — IME height, copy/paste, IME insertion of escape sequences, two-finger gestures. **Mitigation:** install `xterm.js` with `FitAddon` + `WebLinksAddon`, plus a custom "Ctrl/Alt" toolbar above the WebView. Expect iteration.
-3. **Android networking over Tailscale** — Tailscale Android can go to sleep, killing sockets. **Mitigation:** app-side reconnect with backoff, plus a push of "open Tailscale app first" hint when 3+ reconnects fail.
-
-## 11. Open Questions (revisit before Phase 5)
-
-- **Multi-session UX.** Tabs, modal sheets, or one terminal = one screen with a back button?
-- **Tabs in app drawer?** Adding Pilot alongside Tailscale as two apps feels clunky. Worth a `pilot://` deep-link from Tailscale?
-- **Claude Code auth.** First-time `claude` login is interactive. Will it complete cleanly inside our PTY? Phrase 2 verification step.
-- **Filesystem scope.** `$HOME` allowlist is v1 fine; do we eventually support arbitrary roots for headless / work machines?
-- **Logging.** Ship with `--log-file ~/.pilot/log.jsonl`? Truncate policy? Sentry or not?
-
-## 12. What "Done" for v1 Looks Like
-
-Recording on a phone in a coffee shop, with Tailscale up, you can:
-- Open Pilot → tap your laptop → navigate to `~/code/side-project/` → pick `claude` → ask "refactor this file" → see the diff appear in the terminal → answer a yes/no prompt Claude asks → close the app, walk home, reopen → the session is still there, scrolled to where you left it.
-
-If we hit that, v1 ships; everything after is polish.
+In a coffee shop with Tailscale up (or on your home Wi-Fi, faster), you open
+Pilot → tap your laptop → see your running sessions → resume the one where
+Claude Code was mid-edit, or start a new one in `~/code/thing` → answer its
+prompt → lock your phone, get home, reopen → the session is exactly where you
+left it. Installing the daemon was a one-double-click app; you never opened a
+terminal. That's the target.
