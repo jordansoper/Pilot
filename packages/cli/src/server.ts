@@ -11,6 +11,7 @@ import {
   HEALTH_PATH,
   PROTOCOL_VERSION,
   PtyHelloQuerySchema,
+  SessionPatchSchema,
   SESSIONS_PATH,
   SHARED_PACKAGE_VERSION,
   WS_PATH,
@@ -196,6 +197,24 @@ function fsRoot(): string {
   return path.resolve(process.env[FS_ALLOWLIST_ROOT_ENV] || homedir());
 }
 
+/**
+ * Breadcrumb from the allowlist root down to `resolved` (inclusive). All
+ * paths are absolute and host-native — clients never join or split paths,
+ * so the same client code works against `/home/x` and `C:\Users\x`.
+ */
+function fsSegments(root: string, resolved: string): FsResponse['segments'] {
+  const segments = [{ name: path.basename(root) || root, path: root }];
+  if (resolved !== root) {
+    const rel = path.relative(root, resolved);
+    let acc = root;
+    for (const name of rel.split(path.sep)) {
+      acc = path.join(acc, name);
+      segments.push({ name, path: acc });
+    }
+  }
+  return segments;
+}
+
 /** Browse a directory under the allowlist root. Ends the response. */
 async function handleFs(res: ServerResponse, url: URL): Promise<void> {
   const root = fsRoot();
@@ -210,16 +229,73 @@ async function handleFs(res: ServerResponse, url: URL): Promise<void> {
     const dirents = await fs.promises.readdir(resolved, { withFileTypes: true });
     const entries = dirents
       .filter((d) => !d.name.startsWith('.') && (d.isDirectory() || d.isFile()))
-      .map((d) => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' }) as const)
+      .map(
+        (d) =>
+          ({
+            name: d.name,
+            type: d.isDirectory() ? 'dir' : 'file',
+            path: path.join(resolved, d.name),
+          }) as const,
+      )
       // Directories first, then alphabetical — good for a folder picker.
       .sort((a, b) =>
         a.type !== b.type ? (a.type === 'dir' ? -1 : 1) : a.name.localeCompare(b.name),
       );
-    const body: FsResponse = { path: resolved, entries };
+    const body: FsResponse = {
+      path: resolved,
+      parent: resolved === root ? null : path.dirname(resolved),
+      sep: path.sep as FsResponse['sep'],
+      segments: fsSegments(root, resolved),
+      entries,
+    };
     sendJson(res, 200, body);
   } catch {
     sendJson(res, 400, { error: 'cannot read path', path: resolved });
   }
+}
+
+/**
+ * `PATCH /api/sessions/:id` — rename a session. Body: `{ name: string }`
+ * (1–100 chars). Responds with the updated session snapshot.
+ */
+async function handleSessionPatch(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessions: SessionManager,
+  id: string,
+): Promise<void> {
+  let raw = '';
+  try {
+    for await (const chunk of req) {
+      raw += chunk;
+      if (raw.length > 4096) throw new Error('body too large');
+    }
+  } catch {
+    sendJson(res, 400, { error: 'could not read body' });
+    return;
+  }
+  let parsed;
+  try {
+    parsed = SessionPatchSchema.safeParse(JSON.parse(raw));
+  } catch {
+    sendJson(res, 400, { error: 'invalid JSON body' });
+    return;
+  }
+  if (!parsed.success) {
+    sendJson(res, 400, { error: 'invalid body', issues: parsed.error.issues });
+    return;
+  }
+  const name = parsed.data.name.trim();
+  if (!name) {
+    sendJson(res, 400, { error: 'name must not be blank' });
+    return;
+  }
+  if (!sessions.rename(id, name)) {
+    sendJson(res, 404, { error: 'session not found' });
+    return;
+  }
+  const session = sessions.list().find((s) => s.id === id);
+  sendJson(res, 200, { session });
 }
 
 function handleHttp(
@@ -252,8 +328,8 @@ function handleHttp(
   }
 
   // Loopback pairing page is GET-only (it's served before this method guard).
-  // We accept GET + DELETE; DELETE is only meaningful for `/api/sessions/:id`.
-  if (req.method !== 'GET' && req.method !== 'DELETE') {
+  // DELETE and PATCH are only meaningful for `/api/sessions/:id`.
+  if (req.method !== 'GET' && req.method !== 'DELETE' && req.method !== 'PATCH') {
     sendJson(res, 405, { error: 'method not allowed' });
     return;
   }
@@ -278,7 +354,10 @@ function handleHttp(
     sendJson(res, 200, { sessions: sessions.list() });
     return;
   }
-  if (req.method === 'DELETE' && url.pathname.startsWith(SESSIONS_PATH + '/')) {
+  if (
+    (req.method === 'DELETE' || req.method === 'PATCH') &&
+    url.pathname.startsWith(SESSIONS_PATH + '/')
+  ) {
     const id = url.pathname.slice(SESSIONS_PATH.length + 1);
     // Reject non-UUID path segments as 404 (not 405): from the client's view
     // they're asking about a session that doesn't exist, not the wrong verb.
@@ -289,6 +368,10 @@ function handleHttp(
     const exists = sessions.list().some((s) => s.id === id);
     if (!exists) {
       sendJson(res, 404, { error: 'session not found' });
+      return;
+    }
+    if (req.method === 'PATCH') {
+      void handleSessionPatch(req, res, sessions, id);
       return;
     }
     // `remove` kills the PTY; the existing `onExit` callback on the WS

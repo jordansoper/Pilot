@@ -102,7 +102,7 @@ describe('PairingPayloadSchema', () => {
 
 describe('FsEntrySchema / FsResponseSchema', () => {
   it('accepts a dir entry without size/mtime', () => {
-    const e = FsEntrySchema.parse({ name: '.git', type: 'dir' });
+    const e = FsEntrySchema.parse({ name: '.git', type: 'dir', path: '/home/jordan/.git' });
     expect(e.size).toBeUndefined();
   });
 
@@ -110,6 +110,7 @@ describe('FsEntrySchema / FsResponseSchema', () => {
     const e = FsEntrySchema.parse({
       name: 'README.md',
       type: 'file',
+      path: '/home/jordan/README.md',
       size: 1234,
       mtime: 1_700_000_000_000,
     });
@@ -117,18 +118,54 @@ describe('FsEntrySchema / FsResponseSchema', () => {
   });
 
   it('rejects an unknown type', () => {
-    expect(() => FsEntrySchema.parse({ name: 'x', type: 'symlink' })).toThrow();
+    expect(() =>
+      FsEntrySchema.parse({ name: 'x', type: 'symlink', path: '/x' }),
+    ).toThrow();
   });
 
-  it('round-trips a valid response', () => {
+  it('rejects an entry without a path', () => {
+    expect(() => FsEntrySchema.parse({ name: 'x', type: 'dir' })).toThrow();
+  });
+
+  it('round-trips a valid POSIX response', () => {
     const r = FsResponseSchema.parse({
       path: '/home/jordan',
+      parent: null,
+      sep: '/',
+      segments: [{ name: 'jordan', path: '/home/jordan' }],
       entries: [
-        { name: 'code', type: 'dir' },
-        { name: 'README.md', type: 'file', size: 42 },
+        { name: 'code', type: 'dir', path: '/home/jordan/code' },
+        { name: 'README.md', type: 'file', path: '/home/jordan/README.md', size: 42 },
       ],
     });
     expect(r.entries).toHaveLength(2);
+    expect(r.parent).toBeNull();
+  });
+
+  it('round-trips a valid Windows response', () => {
+    const r = FsResponseSchema.parse({
+      path: 'C:\\Users\\jordan\\code',
+      parent: 'C:\\Users\\jordan',
+      sep: '\\',
+      segments: [
+        { name: 'jordan', path: 'C:\\Users\\jordan' },
+        { name: 'code', path: 'C:\\Users\\jordan\\code' },
+      ],
+      entries: [{ name: 'pilot', type: 'dir', path: 'C:\\Users\\jordan\\code\\pilot' }],
+    });
+    expect(r.sep).toBe('\\');
+  });
+
+  it('rejects an unknown separator', () => {
+    expect(() =>
+      FsResponseSchema.parse({
+        path: '/x',
+        parent: null,
+        sep: ':',
+        segments: [{ name: 'x', path: '/x' }],
+        entries: [],
+      }),
+    ).toThrow();
   });
 });
 

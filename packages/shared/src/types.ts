@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import type {
   PairingPayloadSchema,
   FsEntrySchema,
+  FsSegmentSchema,
   FsResponseSchema,
   ToolInfoSchema,
   ToolsResponseSchema,
@@ -13,6 +14,7 @@ import type {
 
 export type PairingPayload = z.infer<typeof PairingPayloadSchema>;
 export type FsEntry = z.infer<typeof FsEntrySchema>;
+export type FsSegment = z.infer<typeof FsSegmentSchema>;
 export type FsResponse = z.infer<typeof FsResponseSchema>;
 export type ToolInfo = z.infer<typeof ToolInfoSchema>;
 export type ToolsResponse = z.infer<typeof ToolsResponseSchema>;

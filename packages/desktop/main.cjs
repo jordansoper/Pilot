@@ -29,6 +29,28 @@ const { homedir, hostname } = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// ───────────────────────────────────────────────────────────────────────
+// Single instance: a second copy tells the user and hands off to the first
+// (which would otherwise fail with EADDRINUSE when its daemon binds the port).
+// ───────────────────────────────────────────────────────────────────────
+
+if (!app.requestSingleInstanceLock()) {
+  dialog.showErrorBox(
+    'Pilot is already running',
+    'Another copy of Pilot is already open — bringing its window to the front instead.',
+  );
+  app.exit(0);
+}
+
+app.on('second-instance', () => {
+  if (!win || win.isDestroyed()) {
+    createWindow();
+  } else {
+    win.show();
+    win.focus();
+  }
+});
+
 const TOKEN_PATH = path.join(homedir(), '.pilot', 'token');
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
 const WINDOW_STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
@@ -85,6 +107,49 @@ function saveSettings(s) {
 
 let settings = loadSettings();
 
+/**
+ * Sync the run-at-login OS setting to `settings.runAtLogin`.
+ *   • macOS/Windows: `app.setLoginItemSettings` (packaged builds only —
+ *     login items need a real signed/installed app).
+ *   • Linux: `setLoginItemSettings` is a no-op, so write/remove a freedesktop
+ *     autostart entry at ~/.config/autostart/pilot.desktop instead.
+ */
+function syncRunAtLogin() {
+  if (process.platform === 'linux') {
+    // app.getPath('appData') is ~/.config on Linux.
+    const desktopPath = path.join(app.getPath('appData'), 'autostart', 'pilot.desktop');
+    try {
+      if (settings.runAtLogin) {
+        // For AppImage, exec the image itself, not the extracted binary.
+        const execPath = process.env.APPIMAGE || process.execPath;
+        fs.mkdirSync(path.dirname(desktopPath), { recursive: true });
+        fs.writeFileSync(
+          desktopPath,
+          [
+            '[Desktop Entry]',
+            'Type=Application',
+            'Name=Pilot',
+            `Exec="${execPath}"`,
+            'X-GNOME-Autostart-enabled=true',
+            '',
+          ].join('\n'),
+          'utf8',
+        );
+      } else {
+        fs.rmSync(desktopPath, { force: true });
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[desktop] could not update autostart entry: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+    return;
+  }
+  if (app.isPackaged) {
+    app.setLoginItemSettings({ openAtLogin: settings.runAtLogin });
+  }
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // Window state persistence
 // ───────────────────────────────────────────────────────────────────────
@@ -134,6 +199,10 @@ function readTokenFromDisk() {
 // Start the daemon (fork daemon.cjs)
 // ───────────────────────────────────────────────────────────────────────
 
+// Auto-restart backoff shared across startDaemon calls: 2s, 4s, 8s, 16s, 32s.
+// Reset once a daemon reaches 'ready' so a later crash starts the ladder over.
+let restartAttempts = 0;
+
 async function startDaemon() {
   const cliDist = getCliDistPath();
   const sharedDist = getSharedDistPath();
@@ -142,7 +211,9 @@ async function startDaemon() {
   // We just pass the paths via environment variables and fork.
 
   return new Promise((resolve, reject) => {
-    daemon = fork(DAEMON_ENTRY, [], {
+    // Capture the child locally: after a settings restart the old child's
+    // late 'exit'/'message' events must not clobber the new daemon's state.
+    const child = fork(DAEMON_ENTRY, [], {
       env: {
         ...process.env,
         PILOT_PORT: String(settings.port),
@@ -154,16 +225,19 @@ async function startDaemon() {
       },
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
+    daemon = child;
 
     // Forward stdout/stderr for dev visibility.
-    daemon.stdout?.on('data', (buf) => process.stdout.write(`[daemon] ${buf}`));
-    daemon.stderr?.on('data', (buf) => process.stderr.write(`[daemon] ${buf}`));
+    child.stdout?.on('data', (buf) => process.stdout.write(`[daemon] ${buf}`));
+    child.stderr?.on('data', (buf) => process.stderr.write(`[daemon] ${buf}`));
 
-    daemon.on('message', (msg) => {
+    child.on('message', (msg) => {
       if (!msg || typeof msg !== 'object') return;
+      if (daemon !== child) return; // stale child from a previous restart
       switch (msg.type) {
         case 'ready':
           pairPort = msg.port;
+          restartAttempts = 0;
           readTokenFromDisk();
           // Notify renderer.
           if (win && !win.isDestroyed()) {
@@ -193,44 +267,44 @@ async function startDaemon() {
       }
     });
 
-    let restartAttempts = 0;
-    daemon.on('exit', (code) => {
+    child.on('exit', (code) => {
+      // Intentional shutdowns (settings restart, quit) null/replace `daemon`
+      // before the child exits — only the current daemon's death matters.
+      if (daemon !== child) return;
+      daemon = null;
       pairPort = null;
       apiToken = null;
-      if (daemon) {
-        // Unexpected exit (intentional shutdown sets daemon=null before exit).
-        // Auto-restart with exponential backoff: 2s, 4s, 8s, 16s, 32s max.
-        // Only auto-restart if the window is still open and we're not quitting.
-        if (win && !win.isDestroyed() && !app.isQuitting) {
-          if (win.webContents.getURL().includes('loading.html')) {
-            // Daemon failed before ever becoming ready.
-            win.loadURL(
-              'data:text/html,' +
-                encodeURIComponent(
-                  `<body style="background:#0f1115;color:#e5e7eb;font-family:system-ui;padding:32px">
-                   <h2>Daemon failed to start (exit ${code}).</h2>
-                   <p>Make sure <code>pnpm --filter @pilot/cli build</code> has been run,
-                   and that <code>@electron/rebuild</code> has rebuilt native modules.</p></body>`,
-                ),
-            );
-          } else {
-            win.webContents.send('pilot:daemon-down');
-            restartAttempts++;
-            if (restartAttempts <= 5) {
-              const delay = Math.min(2000 * Math.pow(2, restartAttempts - 1), 32000);
-              setTimeout(() => {
-                if (win && !win.isDestroyed() && !app.isQuitting) {
-                  startDaemon().catch(() => {});
-                }
-              }, delay);
-            }
+      closeAllTerms();
+      // Unexpected exit: auto-restart with exponential backoff while the
+      // window is still open and we're not quitting.
+      if (win && !win.isDestroyed() && !app.isQuitting) {
+        if (win.webContents.getURL().includes('loading.html')) {
+          // Daemon failed before ever becoming ready.
+          win.loadURL(
+            'data:text/html,' +
+              encodeURIComponent(
+                `<body style="background:#0f1115;color:#e5e7eb;font-family:system-ui;padding:32px">
+                 <h2>Daemon failed to start (exit ${code}).</h2>
+                 <p>Make sure <code>pnpm --filter @pilot/cli build</code> has been run,
+                 and that <code>@electron/rebuild</code> has rebuilt native modules.</p></body>`,
+              ),
+          );
+        } else {
+          win.webContents.send('pilot:daemon-down');
+          restartAttempts++;
+          if (restartAttempts <= 5) {
+            const delay = Math.min(2000 * Math.pow(2, restartAttempts - 1), 32000);
+            setTimeout(() => {
+              if (!daemon && win && !win.isDestroyed() && !app.isQuitting) {
+                startDaemon().catch(() => {});
+              }
+            }, delay);
           }
         }
       }
-      daemon = null;
     });
 
-    daemon.on('error', (err) => {
+    child.on('error', (err) => {
       reject(err);
     });
   });
@@ -317,9 +391,7 @@ function updateTrayMenu() {
       click: (item) => {
         settings.runAtLogin = item.checked;
         saveSettings(settings);
-        if (app.isPackaged) {
-          app.setLoginItemSettings({ openAtLogin: settings.runAtLogin });
-        }
+        syncRunAtLogin();
       },
     },
     { type: 'separator' },
@@ -349,8 +421,11 @@ function createWindow() {
     minHeight: 580,
     title: 'Pilot',
     backgroundColor: '#0f1115',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 14, y: 18 },
+    // Frameless-style chrome is macOS-only; Windows/Linux get a normal
+    // title bar (these options are ignored there, but be explicit).
+    ...(process.platform === 'darwin'
+      ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 14, y: 18 } }
+      : {}),
     show: false,
     webPreferences: {
       contextIsolation: true,
@@ -376,13 +451,17 @@ function createWindow() {
   win.on('resize', debouncedSave);
   win.on('move', debouncedSave);
 
-  // macOS: hide instead of close (consistent with tray behavior).
-  win.on('close', (e) => {
-    if (!app.isQuitting) {
-      e.preventDefault();
-      win.hide();
-    }
-  });
+  // macOS/Windows: hide instead of close (live in the tray). NOT on Linux —
+  // GNOME has no tray by default, so a hidden window would be unrecoverable;
+  // there, closing the window quits (via window-all-closed below).
+  if (process.platform !== 'linux') {
+    win.on('close', (e) => {
+      if (!app.isQuitting) {
+        e.preventDefault();
+        win.hide();
+      }
+    });
+  }
 
   win.on('closed', () => {
     saveWindowState(win);
@@ -405,11 +484,15 @@ function ensureReady() {
   return { port: pairPort, token: apiToken };
 }
 
-async function daemonFetch(method, pathname) {
+async function daemonFetch(method, pathname, body) {
   const { port, token } = ensureReady();
   const res = await fetch(`http://127.0.0.1:${port}${pathname}`, {
     method,
-    headers: { authorization: `Bearer ${token}` },
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
   return res;
 }
@@ -445,6 +528,132 @@ ipcMain.handle('pilot:close-session', async (_evt, id) => {
   throw new Error(`/api/sessions/${id} status=${res.status}`);
 });
 
+ipcMain.handle('pilot:rename-session', async (_evt, id, name) => {
+  if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id)) {
+    throw new Error('invalid session id');
+  }
+  if (typeof name !== 'string' || !name.trim() || name.trim().length > 100) {
+    throw new Error('name must be 1–100 characters');
+  }
+  const res = await daemonFetch('PATCH', `/api/sessions/${id}`, { name: name.trim() });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`/api/sessions/${id} status=${res.status}`);
+  const body = /** @type {any} */ (await res.json());
+  return body.session ?? null;
+});
+
+// ──────────────────────────────────────────────────────────────
+// Terminal bridge — the renderer never sees the token or the raw
+// WebSocket. Main attaches to the daemon's /ws/pty and relays PTY
+// bytes/control frames over IPC. Closing a bridge only detaches:
+// the shell keeps running on the daemon for any device to resume.
+// ──────────────────────────────────────────────────────────────
+
+/** @type {Map<number, import('ws')>} termId → live socket */
+const terms = new Map();
+let nextTermId = 1;
+
+function closeAllTerms() {
+  for (const [id, sock] of terms) {
+    try {
+      sock.close();
+    } catch {
+      /* already gone */
+    }
+    terms.delete(id);
+  }
+}
+
+ipcMain.handle('pilot:term-open', (evt, opts) => {
+  const { port, token } = ensureReady();
+  if (!opts || typeof opts !== 'object') throw new Error('invalid options');
+  const { cwd, tool, sessionId, cols, rows } = opts;
+  if (typeof cwd !== 'string' || !cwd) throw new Error('cwd required');
+  if (typeof tool !== 'string' || !/^[a-z0-9-]+$/.test(tool)) throw new Error('invalid tool');
+  if (sessionId != null && (typeof sessionId !== 'string' || !/^[0-9a-f-]{36}$/i.test(sessionId))) {
+    throw new Error('invalid session id');
+  }
+
+  const params = new URLSearchParams({
+    cwd,
+    tool,
+    cols: String(Number.isInteger(cols) && cols > 0 ? cols : 80),
+    rows: String(Number.isInteger(rows) && rows > 0 ? rows : 24),
+  });
+  if (sessionId) params.set('session', sessionId);
+
+  const WebSocket = require('ws');
+  const sock = new WebSocket(`ws://127.0.0.1:${port}/ws/pty?${params}`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  const termId = nextTermId++;
+  terms.set(termId, sock);
+
+  const wc = evt.sender;
+  const send = (channel, payload) => {
+    if (!wc.isDestroyed()) wc.send(channel, termId, payload);
+  };
+
+  sock.on('message', (data, isBinary) => {
+    if (isBinary) {
+      // Binary frames are JSON control messages ({type:'session'|'exit'}).
+      try {
+        send('pilot:term-control', JSON.parse(data.toString('utf8')));
+      } catch {
+        /* malformed control frame — drop */
+      }
+    } else {
+      send('pilot:term-data', data.toString('utf8'));
+    }
+  });
+  sock.on('close', () => {
+    terms.delete(termId);
+    send('pilot:term-closed', null);
+  });
+  sock.on('error', (err) => {
+    terms.delete(termId);
+    send('pilot:term-control', {
+      type: 'exit',
+      exitCode: -1,
+      signal: null,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
+
+  return termId;
+});
+
+ipcMain.handle('pilot:term-input', (_evt, termId, data) => {
+  const sock = terms.get(termId);
+  if (!sock || typeof data !== 'string') return;
+  try {
+    sock.send(data);
+  } catch {
+    /* socket gone */
+  }
+});
+
+ipcMain.handle('pilot:term-resize', (_evt, termId, cols, rows) => {
+  const sock = terms.get(termId);
+  if (!sock || !Number.isInteger(cols) || !Number.isInteger(rows)) return;
+  try {
+    sock.send(JSON.stringify({ type: 'resize', cols, rows }));
+  } catch {
+    /* socket gone */
+  }
+});
+
+ipcMain.handle('pilot:term-close', (_evt, termId) => {
+  const sock = terms.get(termId);
+  if (!sock) return;
+  terms.delete(termId);
+  try {
+    sock.close();
+  } catch {
+    /* already gone */
+  }
+});
+
 // ──────────────────────────────────────────────────────────────
 // FS browser IPC — proxies to the daemon's /api/fs endpoint.
 // ──────────────────────────────────────────────────────────────
@@ -470,6 +679,8 @@ ipcMain.handle('pilot:get-settings', () => {
 ipcMain.handle('pilot:set-settings', async (_evt, partial) => {
   const oldPort = settings.port;
   const oldBind = settings.bind;
+  const oldName = settings.name;
+  const oldFsRoot = settings.fsRoot ?? homedir();
 
   const updated = { ...settings };
   // Port 0 = ephemeral (OS picks), supported by the CLI.
@@ -489,23 +700,48 @@ ipcMain.handle('pilot:set-settings', async (_evt, partial) => {
     updated.fsRoot = partial.fsRoot;
   }
 
-  const needsRestart = updated.port !== oldPort || updated.bind !== oldBind || updated.fsRoot !== (settings.fsRoot ?? homedir());
+  // Name is baked into the pairing QR, so a name change needs a restart too.
+  const needsRestart =
+    updated.port !== oldPort ||
+    updated.bind !== oldBind ||
+    updated.name !== oldName ||
+    updated.fsRoot !== oldFsRoot;
   settings = updated;
   saveSettings(settings);
 
-  // Sync run-at-login (only in packaged/signed builds).
-  if (app.isPackaged) {
-    app.setLoginItemSettings({ openAtLogin: settings.runAtLogin });
-  }
+  syncRunAtLogin();
   updateTrayMenu();
 
   if (needsRestart) {
-    // Shut down old daemon and start a new one.
+    // Shut down old daemon and start a new one. Wait for the old child to
+    // actually exit first — it holds the port until then, and a same-port
+    // restart (name/fsRoot change) would otherwise race into EADDRINUSE.
+    closeAllTerms();
     if (daemon) {
-      daemon.send({ type: 'shutdown' });
+      const old = daemon;
       daemon = null;
       pairPort = null;
       apiToken = null;
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          try {
+            old.kill('SIGKILL');
+          } catch {
+            /* already gone */
+          }
+          resolve();
+        }, 5000);
+        old.once('exit', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        try {
+          old.send({ type: 'shutdown' });
+        } catch {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
     }
     try {
       await startDaemon();
@@ -532,10 +768,7 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
 
-  // Login items require code signing — only set in packaged/signed builds.
-  if (app.isPackaged) {
-    app.setLoginItemSettings({ openAtLogin: settings.runAtLogin });
-  }
+  syncRunAtLogin();
 
   // Start the daemon.
   try {
@@ -600,6 +833,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', async () => {
   app.isQuitting = true;
   saveWindowState(win);
+  closeAllTerms();
   if (daemon) {
     try {
       daemon.send({ type: 'shutdown' });

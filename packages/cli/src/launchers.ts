@@ -28,22 +28,28 @@ export interface Launcher {
 }
 
 /**
- * Bash launcher.
+ * Default shell launcher.
  *
- * Resolves the binary lazily so users on Windows without `bash` on PATH
- * (the common Git-Bash case) still get a working spawn: we try
- * `process.env.SHELL` first and fall back to the literal `bash`.
- *
- * Uses `-l` (login shell) so `.bash_profile` / `.profile` are sourced and
- * user tooling (`bun`, `ollama`, nvm shims, etc.) ends up on PATH.
+ * Keeps the wire id `bash` (paired apps and stored sessions reference it) but
+ * resolves to the platform's real shell:
+ *   • POSIX: `$SHELL` (falls back to `bash`) with `-l` so `.bash_profile` /
+ *     `.profile` are sourced and user tooling (bun, ollama, nvm shims, etc.)
+ *     ends up on PATH.
+ *   • Windows: PowerShell (node-pty uses ConPTY; no `-l` — that flag doesn't
+ *     exist there). Falls back to `%COMSPEC%` (cmd.exe) if ever needed.
  */
+const isWindows = process.platform === 'win32';
+
 const bashLauncher: Launcher = {
   id: 'bash',
-  label: 'Bash',
+  label: isWindows ? 'PowerShell' : 'Bash',
   spawn(ctx, _hello) {
     // Bracket access because noPropertyAccessFromIndexSignature is on.
-    const bin = process.env['SHELL'] ?? 'bash';
-    return ptySpawn(bin, ['-l'], {
+    const bin = isWindows
+      ? 'powershell.exe'
+      : (process.env['SHELL'] ?? 'bash');
+    const args = isWindows ? ['-NoLogo'] : ['-l'];
+    return ptySpawn(bin, args, {
       name: 'xterm-256color',
       cols: ctx.cols,
       rows: ctx.rows,

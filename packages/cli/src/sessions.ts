@@ -18,6 +18,8 @@ export interface PtySession {
   cwd: string;
   /** Tool id the session runs (e.g. "bash"). */
   tool: string;
+  /** User-assigned display name, or null until renamed. */
+  name: string | null;
   /** Unix epoch ms when created. */
   createdMs: number;
   /** Bounded tail of PTY output, replayed when a client re-attaches. */
@@ -68,6 +70,7 @@ export class SessionManager {
       term,
       cwd: ctx.cwd,
       tool: hello.tool,
+      name: null,
       createdMs: Date.now(),
       buffer: '',
       sink: null,
@@ -133,6 +136,14 @@ export class SessionManager {
     }
   }
 
+  /** Rename a live session. Returns false when the id is unknown. */
+  rename(id: string, name: string): boolean {
+    const s = this.sessions.get(id);
+    if (!s || !s.alive) return false;
+    s.name = name;
+    return true;
+  }
+
   /** Snapshot of live sessions for `GET /api/sessions`, newest first. */
   list(): Array<{
     id: string;
@@ -140,6 +151,7 @@ export class SessionManager {
     tool: string;
     createdMs: number;
     attached: boolean;
+    name?: string;
   }> {
     return [...this.sessions.values()]
       .filter((s) => s.alive)
@@ -150,6 +162,7 @@ export class SessionManager {
         tool: s.tool,
         createdMs: s.createdMs,
         attached: s.attached,
+        ...(s.name ? { name: s.name } : {}),
       }));
   }
 

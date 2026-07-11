@@ -44,6 +44,13 @@ const els = {
   fsListing: $('#fs-listing'),
   fsSelectedPath: $('#fs-selected-path'),
   fsSelectBtn: $('#fs-select-btn'),
+  // Terminal view
+  newSessionBtn: $('#new-session-btn'),
+  termOverlay: $('#term-overlay'),
+  termBackBtn: $('#term-back-btn'),
+  termTitle: $('#term-title'),
+  termSub: $('#term-sub'),
+  termContainer: $('#term-container'),
 };
 
 const state = {
@@ -97,6 +104,7 @@ if (window.pilot?.on) {
     els.statusLabel.textContent = 'Daemon stopped';
     els.statusMeta.textContent = 'Restarting…';
     pairFrameAttempted = false;
+    closeTerminal();
   });
   window.pilot.on('pilot:daemon-error', (_evt, msg) => {
     els.statusDot.dataset.state = 'offline';
@@ -243,12 +251,23 @@ function renderSessions(sessions) {
   }
 }
 
+function sessionLabel(s) {
+  return s.name || s.tool;
+}
+
 function buildSessionCard(s) {
   const card = document.createElement('article');
   card.className = 'session';
   card.dataset.id = s.id;
   card.innerHTML = `
-    <div class="tool">${escapeHtml(s.tool)}</div>
+    <div class="tool">
+      <span class="session-name">${escapeHtml(sessionLabel(s))}</span>
+      <button class="icon-btn rename-btn" title="Rename session" aria-label="Rename session">
+        <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+          <path fill="currentColor" d="M12.146 1.146a.5.5 0 0 1 .708 0l2 2a.5.5 0 0 1 0 .708l-8.5 8.5a.5.5 0 0 1-.222.13l-3 1a.5.5 0 0 1-.632-.632l1-3a.5.5 0 0 1 .13-.222l8.5-8.5zM11.207 3.5 12.5 4.793 13.793 3.5 12.5 2.207 11.207 3.5zm.586 2L10.5 4.207 4 10.707V11h.5a.5.5 0 0 1 .5.5v.5h.293l6.5-6.5z"/>
+        </svg>
+      </button>
+    </div>
     <div class="meta">
       <div class="cwd" title="${escapeAttr(s.cwd)}">${escapeHtml(s.cwd)}</div>
       <div class="row2">
@@ -257,14 +276,32 @@ function buildSessionCard(s) {
         <span class="short-id">· ${s.id.slice(0, 8)}</span>
       </div>
     </div>
-    <button class="stop-btn" data-id="${escapeAttr(s.id)}">Stop</button>
+    <div class="session-actions">
+      <button class="primary-btn open-btn" data-id="${escapeAttr(s.id)}">Open</button>
+      <button class="stop-btn" data-id="${escapeAttr(s.id)}">Stop</button>
+    </div>
   `;
   card.querySelector('.stop-btn').addEventListener('click', () => beginConfirmStop(s.id, card));
+  card.querySelector('.open-btn').addEventListener('click', () => {
+    const current = state.sessions.find((x) => x.id === s.id) ?? s;
+    void openTerminal({
+      sessionId: current.id,
+      cwd: current.cwd,
+      tool: current.tool,
+      title: sessionLabel(current),
+    });
+  });
+  card.querySelector('.rename-btn').addEventListener('click', () => beginRename(s.id, card));
   updateSessionCard(card, s);
   return card;
 }
 
 function updateSessionCard(card, s) {
+  const nameEl = card.querySelector('.session-name');
+  // Skip while an inline rename editor is open so polling doesn't clobber it.
+  if (nameEl && !card.querySelector('.rename-input')) {
+    nameEl.textContent = sessionLabel(s);
+  }
   const pill = card.querySelector('.pill');
   if (pill) {
     pill.textContent = s.attached ? 'attached' : 'detached';
@@ -273,6 +310,53 @@ function updateSessionCard(card, s) {
   }
   const ageEl = card.querySelector('.row2 span:nth-of-type(2)');
   if (ageEl) ageEl.textContent = `started ${formatAge(s.createdMs)}`;
+}
+
+// ── Inline rename ────────────────────────────────────────────────────────
+
+function beginRename(id, card) {
+  const nameEl = card.querySelector('.session-name');
+  if (!nameEl || card.querySelector('.rename-input')) return;
+  const original = nameEl.textContent ?? '';
+
+  const input = document.createElement('input');
+  input.className = 'input rename-input';
+  input.type = 'text';
+  input.maxLength = 100;
+  input.value = original;
+  nameEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    const restore = document.createElement('span');
+    restore.className = 'session-name';
+    restore.textContent = original;
+    input.replaceWith(restore);
+    if (!save) return;
+    const name = input.value.trim();
+    if (!name || name === original) return;
+    restore.textContent = name;
+    window.pilot
+      .renameSession(id, name)
+      .then((session) => {
+        if (!session) restore.textContent = original;
+        void refreshSessionsNow();
+      })
+      .catch((err) => {
+        restore.textContent = original;
+        showInlineError(card, err instanceof Error ? err.message : String(err));
+      });
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') finish(true);
+    else if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
 }
 
 function beginConfirmStop(id, card) {
@@ -451,7 +535,14 @@ document.addEventListener('keydown', (e) => {
 });
 els.fsSelectBtn?.addEventListener('click', () => selectFolder());
 
-function openFolderPicker() {
+/**
+ * When set, the picker hands the chosen path to this callback instead of
+ * the Settings "folder access" input (used by "New session").
+ */
+let fsOnSelect = null;
+
+function openFolderPicker(onSelect) {
+  fsOnSelect = typeof onSelect === 'function' ? onSelect : null;
   // Start browsing from the current fsRoot or the current path if already selected.
   const startPath = els.settingFsRoot.value.trim() || state.fsRoot || '';
   state.fsCurrentPath = startPath;
@@ -464,13 +555,22 @@ function openFolderPicker() {
 
 function closeFolderPicker() {
   els.fsOverlay.classList.add('hidden');
+  fsOnSelect = null;
+}
+
+function deliverPickedFolder(path) {
+  const cb = fsOnSelect;
+  closeFolderPicker();
+  if (cb) cb(path);
+  else els.settingFsRoot.value = path;
 }
 
 function selectFolder() {
   if (state.fsSelectedDir) {
-    els.settingFsRoot.value = state.fsSelectedDir;
+    deliverPickedFolder(state.fsSelectedDir);
+  } else {
+    closeFolderPicker();
   }
-  closeFolderPicker();
 }
 
 async function navigateFs(dirPath) {
@@ -486,8 +586,8 @@ async function navigateFs(dirPath) {
     state.fsSelectedDir = data.path;
     els.fsSelectedPath.textContent = data.path;
     els.fsSelectBtn.removeAttribute('disabled');
-    renderFsBreadcrumb(data.path);
-    renderFsListing(data.path, data.entries);
+    renderFsBreadcrumb(data);
+    renderFsListing(data.entries);
   } catch (err) {
     els.fsListing.innerHTML = `
       <div class="fs-error">
@@ -497,48 +597,36 @@ async function navigateFs(dirPath) {
   }
 }
 
-function renderFsBreadcrumb(fullPath) {
+function renderFsBreadcrumb(data) {
   if (!els.fsBreadcrumb) return;
 
-  // Split the path into segments for clickable breadcrumbs.
-  let segments;
-  if (fullPath === '/') {
-    segments = ['/'];
-  } else {
-    segments = fullPath.split('/').filter(Boolean);
-    segments.unshift('/');
-  }
+  // Segments come from the daemon with absolute paths already attached —
+  // never split or join paths here (separators differ per host OS).
+  const segments = data.segments ?? [];
 
   els.fsBreadcrumb.innerHTML = '';
-  let accumulated = '';
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
-    if (i === 0) {
-      // Root
-      accumulated = '/';
-    } else {
-      accumulated = accumulated === '/' ? `/${seg}` : `${accumulated}/${seg}`;
-    }
 
     const crumb = document.createElement('button');
     crumb.className = 'fs-crumb';
-    crumb.textContent = i === 0 ? 'Home' : seg;
-    crumb.title = accumulated;
-    crumb.addEventListener('click', () => navigateFs(accumulated));
+    crumb.textContent = i === 0 ? 'Home' : seg.name;
+    crumb.title = seg.path;
+    crumb.addEventListener('click', () => navigateFs(seg.path));
 
     els.fsBreadcrumb.appendChild(crumb);
 
     if (i < segments.length - 1) {
       const sep = document.createElement('span');
       sep.className = 'fs-crumb-sep';
-      sep.textContent = '/';
+      sep.textContent = data.sep ?? '/';
       sep.setAttribute('aria-hidden', 'true');
       els.fsBreadcrumb.appendChild(sep);
     }
   }
 }
 
-function renderFsListing(currentPath, entries) {
+function renderFsListing(entries) {
   if (!els.fsListing) return;
   els.fsListing.innerHTML = '';
 
@@ -556,8 +644,7 @@ function renderFsListing(currentPath, entries) {
     item.className = 'fs-item';
     item.setAttribute('role', 'option');
 
-    const entryPath =
-      currentPath === '/' ? `/${entry.name}` : `${currentPath}/${entry.name}`;
+    const entryPath = entry.path;
 
     item.innerHTML = `
       <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" class="fs-folder-icon">
@@ -568,9 +655,8 @@ function renderFsListing(currentPath, entries) {
 
     item.addEventListener('click', () => navigateFs(entryPath));
     item.addEventListener('dblclick', () => {
-      // Double-click: select it immediately (navigate first so UI updates).
-      els.settingFsRoot.value = entryPath;
-      closeFolderPicker();
+      // Double-click: select it immediately.
+      deliverPickedFolder(entryPath);
     });
 
     // Highlight if this is the currently selected (saved) folder root.
@@ -581,6 +667,144 @@ function renderFsListing(currentPath, entries) {
 
     els.fsListing.appendChild(item);
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Terminal view — attach to a session (or start a fresh one) in-app.
+// Closing the view only detaches: the shell keeps running on the daemon,
+// so you can resume here or on any paired device (phone, etc.).
+// ─────────────────────────────────────────────────────────────────────────
+
+const termState = {
+  termId: null,
+  xterm: null,
+  fit: null,
+  unsubs: [],
+  resizeObserver: null,
+  open: false,
+};
+
+els.newSessionBtn?.addEventListener('click', () => {
+  openFolderPicker((path) => {
+    void openTerminal({ cwd: path, tool: 'bash', title: 'bash' });
+  });
+});
+
+els.termBackBtn?.addEventListener('click', () => closeTerminal());
+document.addEventListener('keydown', (e) => {
+  // Cmd+W-style escape hatch isn't wired; Escape only when xterm not focused.
+  if (e.key === 'Escape' && termState.open && !els.termContainer.contains(document.activeElement)) {
+    closeTerminal();
+  }
+});
+
+async function openTerminal({ sessionId, cwd, tool, title }) {
+  if (termState.open) closeTerminal();
+  termState.open = true;
+
+  els.termTitle.textContent = title || tool;
+  els.termSub.textContent = cwd;
+  els.termOverlay.classList.remove('hidden');
+
+  const xterm = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: '"SF Mono", Menlo, Monaco, monospace',
+    scrollback: 5000,
+    theme: {
+      background: '#0f1115',
+      foreground: '#e5e7eb',
+      cursor: '#e5e7eb',
+      selectionBackground: '#374151',
+    },
+  });
+  const fit = new FitAddon.FitAddon();
+  xterm.loadAddon(fit);
+  xterm.open(els.termContainer);
+  fit.fit();
+  xterm.focus();
+
+  termState.xterm = xterm;
+  termState.fit = fit;
+
+  let termId;
+  try {
+    termId = await window.pilot.termOpen({
+      sessionId: sessionId ?? undefined,
+      cwd,
+      tool,
+      cols: xterm.cols,
+      rows: xterm.rows,
+    });
+  } catch (err) {
+    xterm.writeln(`\x1b[31mCould not open session: ${err instanceof Error ? err.message : err}\x1b[0m`);
+    return;
+  }
+  termState.termId = termId;
+
+  // Bridge events (filtered by termId — an older bridge may still flush).
+  termState.unsubs.push(
+    window.pilot.on('pilot:term-data', (id, data) => {
+      if (id === termId && termState.xterm) termState.xterm.write(data);
+    }),
+    window.pilot.on('pilot:term-control', (id, msg) => {
+      if (id !== termId || !termState.xterm || !msg) return;
+      if (msg.type === 'session') {
+        // Fresh session id — refresh the list so the new card appears.
+        void refreshSessionsNow();
+      } else if (msg.type === 'exit') {
+        const detail = msg.error ? `: ${msg.error}` : ` (exit ${msg.exitCode})`;
+        termState.xterm.writeln(`\r\n\x1b[33msession ended${detail}\x1b[0m`);
+      }
+    }),
+    window.pilot.on('pilot:term-closed', (id) => {
+      if (id !== termId || !termState.open) return;
+      // Daemon dropped the socket (session stopped elsewhere / daemon restart).
+      termState.xterm?.writeln('\r\n\x1b[33mdisconnected\x1b[0m');
+    }),
+  );
+
+  // Keystrokes → PTY.
+  const dataDisp = xterm.onData((data) => {
+    void window.pilot.termInput(termId, data);
+  });
+  termState.unsubs.push(() => dataDisp.dispose());
+
+  // Container resize → refit → PTY resize.
+  const ro = new ResizeObserver(() => {
+    if (!termState.fit || !termState.xterm) return;
+    termState.fit.fit();
+    void window.pilot.termResize(termId, termState.xterm.cols, termState.xterm.rows);
+  });
+  ro.observe(els.termContainer);
+  termState.resizeObserver = ro;
+}
+
+function closeTerminal() {
+  if (!termState.open) return;
+  termState.open = false;
+
+  if (termState.termId != null) {
+    void window.pilot.termClose(termState.termId);
+    termState.termId = null;
+  }
+  for (const unsub of termState.unsubs) {
+    try {
+      unsub();
+    } catch {
+      /* already removed */
+    }
+  }
+  termState.unsubs = [];
+  termState.resizeObserver?.disconnect();
+  termState.resizeObserver = null;
+  termState.xterm?.dispose();
+  termState.xterm = null;
+  termState.fit = null;
+
+  els.termOverlay.classList.add('hidden');
+  els.termContainer.innerHTML = '';
+  void refreshSessionsNow();
 }
 
 // ─────────────────────────────────────────────────────────────────────────

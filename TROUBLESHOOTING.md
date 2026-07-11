@@ -80,6 +80,14 @@ below for the Git Bash friction. Quick rough edges:
   so Tailscale IP fetches work.
 - The `usesCleartextTraffic=true` only enables `http://` to RFC1918/loopback
   Tailscale IPs (100.x); do NOT use it for production endpoints.
+- **Firewall prompt on first launch**: the daemon binds `0.0.0.0`, so
+  Windows Defender Firewall asks to allow inbound access. This must be
+  **allowed** (at least on Private networks) or the phone can never reach
+  the daemon — pairing will scan fine and then time out, with no other
+  error. If the prompt was dismissed: Windows Security → Firewall &
+  network protection → Allow an app through firewall → tick Pilot.
+- The default `bash` tool spawns **PowerShell** on Windows (the wire id
+  stays `bash` for app compatibility).
 
 ---
 

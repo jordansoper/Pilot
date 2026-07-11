@@ -953,3 +953,129 @@ input[type='number'].input::-webkit-outer-spin-button {
 .settings-container::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.18);
 }
+
+/* ── Session actions (Open/Stop) + inline rename ─────────────────────── */
+
+.session-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-actions .open-btn {
+  font-size: 12px;
+  padding: 5px 12px;
+}
+
+.session .tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 180px;
+}
+
+.session-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-btn {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0;
+  transition: color 0.12s ease, opacity 0.12s ease;
+}
+
+.session:hover .icon-btn {
+  opacity: 1;
+}
+
+.icon-btn:hover {
+  color: var(--accent);
+}
+
+.rename-input {
+  font-family: var(--mono);
+  font-size: 12px;
+  width: 130px;
+  padding: 2px 6px;
+}
+
+/* ── Terminal view ───────────────────────────────────────────────────── */
+
+.term-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  padding-top: 38px; /* clear the traffic lights (hidden-inset title bar) */
+}
+
+.term-overlay.hidden {
+  display: none;
+}
+
+.term-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+}
+
+.term-head button {
+  -webkit-app-region: no-drag;
+}
+
+.term-titles {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+#term-title {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.term-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+#term-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 4px 4px 12px;
+}
+
+#term-container .xterm {
+  height: 100%;
+}

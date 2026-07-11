@@ -8,6 +8,7 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src http://localhost:* http://127.0.0.1:*;"
     />
+    <link rel="stylesheet" href="./vendor/xterm.css" />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
@@ -58,6 +59,9 @@
               </button>
             </div>
           </div>
+          <button id="new-session-btn" class="primary-btn" title="Start a new terminal session on this machine">
+            + New session
+          </button>
         </div>
         <div id="sessions-list" class="sessions-list" aria-live="polite"></div>
       </section>
@@ -193,6 +197,26 @@
       </div>
     </div>
 
+    <!-- ── Terminal view (covers the window while a session is open) ────── -->
+    <div id="term-overlay" class="term-overlay hidden">
+      <div class="term-head">
+        <button id="term-back-btn" class="ghost-btn" title="Back to sessions (session keeps running)">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path fill="currentColor" d="M9.354 3.646a.5.5 0 0 1 0 .708L5.707 8l3.647 3.646a.5.5 0 0 1-.708.708l-4-4a.5.5 0 0 1 0-.708l4-4a.5.5 0 0 1 .708 0z"/>
+          </svg>
+          Back
+        </button>
+        <div class="term-titles">
+          <span id="term-title">Terminal</span>
+          <span id="term-sub" class="term-sub"></span>
+        </div>
+        <span class="term-hint">Keeps running when you go back — resume here or on your phone</span>
+      </div>
+      <div id="term-container"></div>
+    </div>
+
+    <script src="./vendor/xterm.js"></script>
+    <script src="./vendor/addon-fit.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

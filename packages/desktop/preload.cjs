@@ -31,6 +31,33 @@ contextBridge.exposeInMainWorld('pilot', {
    */
   closeSession: (id) => ipcRenderer.invoke('pilot:close-session', id),
 
+  /**
+   * Rename a session (PATCH /api/sessions/:id). Returns the updated
+   * session snapshot, or null when the session no longer exists.
+   */
+  renameSession: (id, name) => ipcRenderer.invoke('pilot:rename-session', id, name),
+
+  /**
+   * Open a terminal bridge. Main attaches to the daemon's /ws/pty and
+   * relays over IPC ('pilot:term-data' / 'pilot:term-control' /
+   * 'pilot:term-closed', each prefixed with the returned termId).
+   * Pass `sessionId` to re-attach to a live session; omit to start fresh.
+   */
+  termOpen: (opts) => ipcRenderer.invoke('pilot:term-open', opts),
+
+  /** Write keystrokes to an open terminal bridge. */
+  termInput: (termId, data) => ipcRenderer.invoke('pilot:term-input', termId, data),
+
+  /** Propagate a viewport resize to the PTY. */
+  termResize: (termId, cols, rows) =>
+    ipcRenderer.invoke('pilot:term-resize', termId, cols, rows),
+
+  /**
+   * Close a terminal bridge. Detach-only: the shell keeps running on the
+   * daemon so this (or any paired) device can re-attach later.
+   */
+  termClose: (termId) => ipcRenderer.invoke('pilot:term-close', termId),
+
   /** Read current settings (port, bind, name, runAtLogin). */
   getSettings: () => ipcRenderer.invoke('pilot:get-settings'),
 

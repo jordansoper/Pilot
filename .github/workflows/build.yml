@@ -1,0 +1,79 @@
+# Build Pilot desktop for macOS, Windows, and Linux — one job per OS.
+#
+# Native modules (node-pty) must be compiled on the OS they target against
+# Electron's ABI, so cross-building from a single machine is not possible;
+# this matrix is the "build all three at the same time" answer.
+#
+# • Every push/PR to main: build + test on all three OSes, upload the
+#   installers as workflow artifacts.
+# • Tag push (v*): additionally attach the installers to a GitHub Release.
+#
+# macOS signing/notarization is intentionally NOT configured yet — add
+# CSC_LINK / CSC_KEY_PASSWORD / APPLE_ID secrets when a Developer ID
+# certificate exists.
+
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: pilot-mac
+            files: |
+              packages/desktop/dist/*.dmg
+              packages/desktop/dist/*-mac.zip
+          - os: windows-latest
+            artifact: pilot-windows
+            files: packages/desktop/dist/*.exe
+          - os: ubuntu-latest
+            artifact: pilot-linux
+            files: |
+              packages/desktop/dist/*.AppImage
+              packages/desktop/dist/*.deb
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Runs each package's postinstall, including electron-builder
+      # install-app-deps in @pilot/desktop (rebuilds node-pty for Electron).
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --filter @pilot/shared build
+      - run: pnpm --filter @pilot/cli build
+
+      - run: pnpm --filter @pilot/shared test
+      - run: pnpm --filter @pilot/cli test
+
+      # Package for the host OS (targets come from package.json "build").
+      - run: pnpm --filter @pilot/desktop exec electron-builder --publish never
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.files }}
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.files }}
