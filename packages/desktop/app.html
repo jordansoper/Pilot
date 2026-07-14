@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pilot</title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src http://localhost:* http://127.0.0.1:*;"
+    />
+    <link rel="stylesheet" href="./vendor/xterm.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- Drag region — macOS hidden inset title bar. -->
+    <header class="appbar">
+      <div class="dragregion">
+        <div class="brand">Pilot</div>
+      </div>
+    </header>
+
+    <!-- Tabs. -->
+    <nav class="tabs" role="tablist" aria-label="Pilot sections">
+      <button id="tab-pair" class="tab" role="tab" aria-selected="true">Pair</button>
+      <button id="tab-sessions" class="tab" role="tab" aria-selected="false">
+        Sessions<span id="session-badge" class="badge" hidden>0</span>
+      </button>
+      <button id="tab-settings" class="tab" role="tab" aria-selected="false">Settings</button>
+    </nav>
+
+    <main>
+      <!-- Pair tab. -->
+      <section id="panel-pair" class="panel" role="tabpanel" aria-labelledby="tab-pair">
+        <iframe id="pair-frame" title="Pilot pairing QR" sandbox="allow-same-origin"></iframe>
+        <div id="pair-placeholder" class="placeholder">
+          <div class="dot"></div>
+          <div>Waiting for the daemon…</div>
+        </div>
+      </section>
+
+      <!-- Sessions tab. -->
+      <section
+        id="panel-sessions"
+        class="panel hidden"
+        role="tabpanel"
+        aria-labelledby="tab-sessions"
+      >
+        <div class="panel-head">
+          <div class="head-titles">
+            <h2>Active sessions</h2>
+            <div class="sub">
+              <span id="session-count">0</span> running ·
+              <span id="last-updated">never</span>
+              <button id="refresh-btn" class="ghost-btn" title="Refresh now" aria-label="Refresh sessions">
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                  <path fill="currentColor" d="M8 3a5 5 0 1 1-3.54 1.46l.7.7A4 4 0 1 0 8 4v1.5l3-2-3-2V3z"/>
+                </svg>
+                Refresh
+              </button>
+            </div>
+          </div>
+          <button id="new-session-btn" class="primary-btn" title="Start a new terminal session on this machine">
+            + New session
+          </button>
+        </div>
+        <div id="sessions-list" class="sessions-list" aria-live="polite"></div>
+      </section>
+
+      <!-- Settings tab. -->
+      <section
+        id="panel-settings"
+        class="panel hidden"
+        role="tabpanel"
+        aria-labelledby="tab-settings"
+      >
+        <div class="settings-container">
+          <form id="settings-form" autocomplete="off" spellcheck="false">
+            <!-- Port -->
+            <label class="field" for="setting-port">
+              <span class="field-label">Port</span>
+              <span class="field-hint">TCP port the daemon listens on (default 7117).</span>
+              <input id="setting-port" class="input" type="number" min="0" max="65535" placeholder="7117" />
+            </label>
+
+            <!-- Bind address -->
+            <label class="field" for="setting-bind">
+              <span class="field-label">Bind address</span>
+              <span class="field-hint">
+                IP the daemon binds to.
+                <code>0.0.0.0</code> = reachable from phone over LAN/Tailscale.
+                <code>127.0.0.1</code> = loopback only.
+              </span>
+              <div class="bind-row">
+                <input id="setting-bind" class="input" type="text" placeholder="0.0.0.0" />
+                <button type="button" id="bind-tailscale-btn" class="ghost-btn" title="Auto-detect and use Tailscale IP">
+                  Use Tailscale IP
+                </button>
+              </div>
+            </label>
+
+            <!-- Machine name -->
+            <label class="field" for="setting-name">
+              <span class="field-label">Machine name</span>
+              <span class="field-hint">Friendly name shown in the QR code and phone app.</span>
+              <input id="setting-name" class="input" type="text" placeholder="My MacBook" />
+            </label>
+
+            <!-- Folder access (FS allowlist root) -->
+            <div class="field">
+              <span class="field-label">Folder access</span>
+              <span class="field-hint">
+                Root directory the phone app can browse when picking a working folder.
+                <code>$HOME</code> by default. Restart applies on save.
+              </span>
+              <div class="bind-row">
+                <input id="setting-fsroot" class="input fsroot-input" type="text" readonly placeholder="/Users/…" />
+                <button type="button" id="fsroot-browse-btn" class="ghost-btn" title="Browse for a folder">
+                  <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                    <path fill="currentColor" d="M2 3a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V5a1 1 0 0 0-1-1H8.5L7.3 3H2z"/>
+                  </svg>
+                  Browse…
+                </button>
+              </div>
+            </div>
+
+            <!-- Run at login -->
+            <label class="field checkbox-field" for="setting-login">
+              <div class="checkbox-row">
+                <input id="setting-login" type="checkbox" />
+                <span class="field-label">Run at login</span>
+              </div>
+              <span class="field-hint">Launch Pilot automatically when you log in.</span>
+            </label>
+
+            <!-- Actions -->
+            <div class="settings-actions">
+              <button type="submit" class="primary-btn" id="settings-save">Save settings</button>
+              <span id="settings-feedback" class="settings-feedback"></span>
+            </div>
+
+            <div id="restart-banner" class="restart-banner hidden">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <path fill="currentColor" d="M8 1a1 1 0 0 1 1 1v2a1 1 0 0 1-2 0V2a1 1 0 0 1 1-1zM4.93 3.34a1 1 0 0 1 .26 1.4 5 5 0 1 0 6.34.73l-.7.7a1 1 0 0 1-1.41-1.41l2.5-2.5a1 1 0 0 1 1.41 0l2.5 2.5a1 1 0 0 1-1.41 1.41l-.75-.75A7 7 0 1 1 3.54 4.74a1 1 0 0 1 1.4-.26z"/>
+              </svg>
+              Port, bind address, or folder root changed — daemon restarted.
+            </div>
+          </form>
+        </div>
+      </section>
+    </main>
+
+    <!-- Status footer. -->
+    <footer class="statusbar">
+      <div class="status-left">
+        <span id="status-dot" class="status-dot" data-state="loading"></span>
+        <span id="status-label">Connecting…</span>
+      </div>
+      <div class="status-right">
+        <span id="status-meta"></span>
+      </div>
+    </footer>
+
+    <!-- Stop-confirm popover template. -->
+    <template id="confirm-tpl">
+      <div class="confirm-pop">
+        <span>Close this session?</span>
+        <div class="confirm-actions">
+          <button class="ghost-btn cancel">Cancel</button>
+          <button class="danger-btn confirm">Stop</button>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── Folder picker modal ──────────────────────────────────────────── -->
+    <div id="fs-overlay" class="fs-overlay hidden">
+      <div class="fs-modal">
+        <div class="fs-modal-head">
+          <h3>Choose a folder</h3>
+          <button id="fs-close-btn" class="ghost-btn" title="Close" aria-label="Close folder picker">
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path fill="currentColor" d="M4.646 4.646a.5.5 0 0 1 .708 0L8 7.293l2.646-2.647a.5.5 0 0 1 .708.708L8.707 8l2.647 2.646a.5.5 0 0 1-.708.708L8 8.707l-2.646 2.647a.5.5 0 0 1-.708-.708L7.293 8 4.646 5.354a.5.5 0 0 1 0-.708z"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Breadcrumb -->
+        <nav id="fs-breadcrumb" class="fs-breadcrumb" aria-label="Folder path"></nav>
+
+        <!-- Directory listing -->
+        <div id="fs-listing" class="fs-listing" role="listbox" aria-label="Folders"></div>
+
+        <!-- Footer -->
+        <div class="fs-modal-foot">
+          <span id="fs-selected-path" class="fs-selected-path"></span>
+          <button id="fs-select-btn" class="primary-btn" disabled>Select This Folder</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Terminal view (covers the window while a session is open) ────── -->
+    <div id="term-overlay" class="term-overlay hidden">
+      <div class="term-head">
+        <button id="term-back-btn" class="ghost-btn" title="Back to sessions (session keeps running)">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path fill="currentColor" d="M9.354 3.646a.5.5 0 0 1 0 .708L5.707 8l3.647 3.646a.5.5 0 0 1-.708.708l-4-4a.5.5 0 0 1 0-.708l4-4a.5.5 0 0 1 .708 0z"/>
+          </svg>
+          Back
+        </button>
+        <div class="term-titles">
+          <span id="term-title">Terminal</span>
+          <span id="term-sub" class="term-sub"></span>
+        </div>
+        <span class="term-hint">Keeps running when you go back — resume here or on your phone</span>
+      </div>
+      <div id="term-container"></div>
+    </div>
+
+    <script src="./vendor/xterm.js"></script>
+    <script src="./vendor/addon-fit.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -48,6 +48,8 @@ export async function apiDelete<T = { ok: boolean }>(
       signal: controller.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // The daemon replies 204 No Content on success — nothing to parse.
+    if (res.status === 204) return { ok: true } as T;
     return (await res.json()) as T;
   } finally {
     clearTimeout(timeout);

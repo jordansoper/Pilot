@@ -1,6 +1,6 @@
 # Pilot
 
-Remote CLI connector — pair your phone with your dev machines over **Tailscale** and launch AI CLIs (Freebuff, Claude Code, Ollama) on them from anywhere.
+Remote CLI connector — pair your phone with your dev machines over **Tailscale** and launch CLIs from anywhere.
 
 > 📄 The full plan lives in [`PROJECT_PLAN.md`](./PROJECT_PLAN.md). Read that before changing architecture.
 

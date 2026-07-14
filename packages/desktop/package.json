@@ -1,14 +1,132 @@
 {
   "name": "@pilot/desktop",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Pilot desktop app (Phase 6 scaffold) — launches the daemon and shows the pairing QR in a window. See PROJECT_PLAN §9 Phase 6.",
+  "version": "0.1.0",
+  "author": "Pilot",
+  "description": "Pilot desktop app — self-contained Electron wrapper for the Pilot daemon. macOS + Windows + Linux.",
   "main": "main.cjs",
   "scripts": {
     "start": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && electron .",
-    "clean": "echo 'nothing to clean'"
+    "postinstall": "electron-builder install-app-deps",
+    "rebuild": "pnpm exec @electron/rebuild",
+    "package": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && pnpm exec electron-builder --mac",
+    "package:dir": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && pnpm exec electron-builder --mac --dir",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "node-pty": "^1.0.0",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
   },
   "devDependencies": {
-    "electron": "^33.2.0"
+    "@electron/rebuild": "^3.6.0",
+    "electron": "33.4.11",
+    "electron-builder": "^25.1.0"
+  },
+  "build": {
+    "appId": "dev.pilot.desktop",
+    "productName": "Pilot",
+    "npmRebuild": false,
+    "afterPack": "build/after-pack.cjs",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "dmg": {
+      "title": "Pilot",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Development",
+      "maintainer": "Jordan Soper <jordansoper29@gmail.com>",
+      "synopsis": "Remote terminal sessions from your phone"
+    },
+    "asarUnpack": [
+      "node_modules/**"
+    ],
+    "files": [
+      "main.cjs",
+      "daemon.cjs",
+      "preload.cjs",
+      "app.html",
+      "app.js",
+      "styles.css",
+      "loading.html",
+      "icon.png",
+      "vendor/**",
+      "node_modules/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../cli/dist",
+        "to": "cli-dist"
+      },
+      {
+        "from": "../shared/dist",
+        "to": "shared-dist"
+      }
+    ]
   }
 }

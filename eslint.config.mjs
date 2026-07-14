@@ -14,6 +14,7 @@ export default [
       '**/build/**',
       '**/.expo/**',
       '**/coverage/**',
+      '**/vendor/**',
       '**/*.config.{js,mjs,cjs}',
     ],
   },
@@ -107,6 +108,18 @@ export default [
     },
     rules: {
       '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
+
+  // Desktop Electron renderer (browser globals — runs in a sandboxed
+  // BrowserWindow, no Node, no modules). Terminal/FitAddon come from the
+  // vendored xterm.js UMD bundles loaded via <script> before app.js.
+  {
+    files: ['packages/desktop/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: { ...globals.browser, Terminal: 'readonly', FitAddon: 'readonly' },
     },
   },
 

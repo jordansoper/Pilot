@@ -12,15 +12,47 @@ export function isValidIpv4(s: string): boolean {
 }
 
 /**
+ * Candidate `tailscale` binaries, tried in order. Plain `tailscale` first
+ * (PATH), then known install locations — important for GUI-launched
+ * processes: a packaged app inherits a minimal PATH (no /opt/homebrew/bin,
+ * no Program Files), so PATH lookup alone misses common installs.
+ */
+function tailscaleCandidates(): string[] {
+  switch (process.platform) {
+    case 'darwin':
+      return [
+        'tailscale',
+        '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+        '/opt/homebrew/bin/tailscale',
+        '/usr/local/bin/tailscale',
+      ];
+    case 'win32':
+      return ['tailscale', 'C:\\Program Files\\Tailscale\\tailscale.exe'];
+    default:
+      return ['tailscale', '/usr/bin/tailscale', '/usr/sbin/tailscale'];
+  }
+}
+
+/**
  * Best-effort resolution of this host's Tailscale IPv4 address.
  *
- * Strategy: spawn `tailscale ip -4`, read stdout until close or 1s timeout,
- * accept the first whitespace-separated token that looks like an IPv4.
- * Returns `null` on every failure (binary missing, not on a tailnet, timeout,
- * garbage output). This deliberately never throws — the daemon still works
- * without Tailscale, just won't be reachable cross-machine.
+ * Strategy: spawn `tailscale ip -4` (trying each known binary location),
+ * read stdout until close or 1s timeout, accept the first
+ * whitespace-separated token that looks like an IPv4. Returns `null` on
+ * every failure (binary missing, not on a tailnet, timeout, garbage output).
+ * This deliberately never throws — the daemon still works without Tailscale,
+ * just won't be reachable cross-machine.
  */
 export async function getTailscaleIp(): Promise<string | null> {
+  for (const bin of tailscaleCandidates()) {
+    const ip = await tryTailscaleIp(bin);
+    if (ip) return ip;
+  }
+  return null;
+}
+
+/** Run one candidate binary; null on any failure. */
+function tryTailscaleIp(bin: string): Promise<string | null> {
   return new Promise((resolve) => {
     let out = '';
     let settled = false;
@@ -39,7 +71,7 @@ export async function getTailscaleIp(): Promise<string | null> {
     };
 
     try {
-      proc = spawn('tailscale', ['ip', '-4'], {
+      proc = spawn(bin, ['ip', '-4'], {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
       });

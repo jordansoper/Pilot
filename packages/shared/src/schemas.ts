@@ -34,15 +34,40 @@ export const PairingPayloadSchema = z.object({
 export const FsEntrySchema = z.object({
   name: z.string().min(1).max(255),
   type: z.enum(['dir', 'file']),
+  /**
+   * Absolute path of the entry, joined SERVER-side so clients never build
+   * paths themselves (separators differ per host OS: `/` vs `\`).
+   */
+  path: z.string().min(1),
   /** Bytes, present for files where stat() succeeded. */
   size: z.number().int().nonnegative().optional(),
   /** Unix epoch ms. */
   mtime: z.number().int().nonnegative().optional(),
 });
 
-/** Response payload of `GET /api/fs?path=…`. */
+/** One breadcrumb segment from the allowlist root down to the current dir. */
+export const FsSegmentSchema = z.object({
+  /** Display name (basename; the root segment may be e.g. `/` or `C:\`). */
+  name: z.string().min(1),
+  /** Absolute path to navigate to when the crumb is tapped. */
+  path: z.string().min(1),
+});
+
+/**
+ * Response payload of `GET /api/fs?path=…`.
+ *
+ * All navigation targets (`parent`, `segments[].path`, `entries[].path`) are
+ * absolute paths computed by the host, so clients treat paths as opaque
+ * strings and work identically against macOS, Linux, and Windows daemons.
+ */
 export const FsResponseSchema = z.object({
   path: z.string().min(1),
+  /** Absolute path of the parent dir, or null at the allowlist root. */
+  parent: z.string().min(1).nullable(),
+  /** Host path separator — for display only, never for joining. */
+  sep: z.enum(['/', '\\']),
+  /** Breadcrumb trail, allowlist root first, current dir last. */
+  segments: z.array(FsSegmentSchema).min(1),
   entries: z.array(FsEntrySchema),
 });
 
@@ -76,7 +101,7 @@ export const SessionInfoSchema = z.object({
   createdMs: z.number().int().nonnegative(),
   /** Whether a client is currently attached. */
   attached: z.boolean(),
-  /** Optional human-readable name set by the user. */
+  /** User-assigned display name, set via `PUT /api/sessions/:id`. */
   name: z.string().min(1).max(100).optional(),
 });
 

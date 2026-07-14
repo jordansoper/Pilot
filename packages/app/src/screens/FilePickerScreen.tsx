@@ -54,7 +54,9 @@ export function FilePickerScreen({ machineId, onBack, onPick }: FilePickerScreen
   }, [machineId, browse]);
 
   const current = data?.path ?? '';
-  const parent = current.includes('/') ? current.slice(0, current.lastIndexOf('/')) : '';
+  // Navigation targets come from the daemon as absolute host-native paths —
+  // never split or join them here (the host may be macOS, Linux, or Windows).
+  const parent = data?.parent ?? null;
   const dirs = (data?.entries ?? []).filter((e) => e.type === 'dir');
 
   return (
@@ -92,7 +94,7 @@ export function FilePickerScreen({ machineId, onBack, onPick }: FilePickerScreen
             <TouchableOpacity
               key={d.name}
               style={styles.row}
-              onPress={() => machine && void browse(machine, joinPath(current, d.name))}
+              onPress={() => machine && void browse(machine, d.path)}
             >
               <Text style={styles.rowIcon}>📁</Text>
               <Text style={styles.rowName}>{d.name}</Text>
@@ -107,10 +109,6 @@ export function FilePickerScreen({ machineId, onBack, onPick }: FilePickerScreen
       )}
     </View>
   );
-}
-
-function joinPath(base: string, name: string): string {
-  return base.endsWith('/') ? `${base}${name}` : `${base}/${name}`;
 }
 
 const styles = StyleSheet.create({

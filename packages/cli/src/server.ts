@@ -227,6 +227,24 @@ function resolveFsRoot(settings: DaemonSettings): string {
   return path.resolve(settings.fsRoot);
 }
 
+/**
+ * Breadcrumb from the allowlist root down to `resolved` (inclusive). All
+ * paths are absolute and host-native — clients never join or split paths,
+ * so the same client code works against `/home/x` and `C:\Users\x`.
+ */
+function fsSegments(root: string, resolved: string): FsResponse['segments'] {
+  const segments = [{ name: path.basename(root) || root, path: root }];
+  if (resolved !== root) {
+    const rel = path.relative(root, resolved);
+    let acc = root;
+    for (const name of rel.split(path.sep)) {
+      acc = path.join(acc, name);
+      segments.push({ name, path: acc });
+    }
+  }
+  return segments;
+}
+
 /** Browse a directory under the allowlist root. Ends the response. */
 async function handleFs(res: ServerResponse, url: URL, settings: DaemonSettings): Promise<void> {
   const root = resolveFsRoot(settings);
@@ -241,12 +259,25 @@ async function handleFs(res: ServerResponse, url: URL, settings: DaemonSettings)
     const dirents = await fs.promises.readdir(resolved, { withFileTypes: true });
     const entries = dirents
       .filter((d) => !d.name.startsWith('.') && (d.isDirectory() || d.isFile()))
-      .map((d) => ({ name: d.name, type: d.isDirectory() ? 'dir' : 'file' }) as const)
+      .map(
+        (d) =>
+          ({
+            name: d.name,
+            type: d.isDirectory() ? 'dir' : 'file',
+            path: path.join(resolved, d.name),
+          }) as const,
+      )
       // Directories first, then alphabetical — good for a folder picker.
       .sort((a, b) =>
         a.type !== b.type ? (a.type === 'dir' ? -1 : 1) : a.name.localeCompare(b.name),
       );
-    const body: FsResponse = { path: resolved, entries };
+    const body: FsResponse = {
+      path: resolved,
+      parent: resolved === root ? null : path.dirname(resolved),
+      sep: path.sep as FsResponse['sep'],
+      segments: fsSegments(root, resolved),
+      entries,
+    };
     sendJson(res, 200, body);
   } catch {
     sendJson(res, 400, { error: 'cannot read path', path: resolved });
@@ -284,15 +315,32 @@ function handleHttp(
   }
 
   // ── Per-session routes: /api/sessions/<uuid> ────────────────────
-  const sessionMatch = /^\/api\/sessions\/([0-9a-f-]{36})$/.exec(url.pathname);
-  if (sessionMatch?.[1]) {
-    const sid = sessionMatch[1];
-    if (req.method === 'DELETE') {
-      sessions.remove(sid);
-      sendJson(res, 200, { ok: true });
+  if (url.pathname.startsWith(SESSIONS_PATH + '/')) {
+    const sid = url.pathname.slice(SESSIONS_PATH.length + 1);
+    // Reject non-UUID path segments as 404 (not 405): from the client's view
+    // they're asking about a session that doesn't exist, not the wrong verb.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sid)) {
+      sendJson(res, 404, { error: 'session not found' });
       return;
     }
-    if (req.method === 'PUT') {
+    if (req.method === 'DELETE') {
+      if (!sessions.list().some((s) => s.id === sid)) {
+        sendJson(res, 404, { error: 'session not found' });
+        return;
+      }
+      // `remove` kills the PTY; the existing `onExit` callback on the WS
+      // connection immediately forwards a binary `{type:'exit'}` control
+      // frame to any attached client and closes the socket — so killing a
+      // session that's currently in use cleanly drops the user out at their
+      // terminal.
+      sessions.remove(sid);
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    // Both verbs are supported: the mobile app uses PUT, the desktop app
+    // uses PATCH. Same handler either way.
+    if (req.method === 'PUT' || req.method === 'PATCH') {
       void handleSessionRename(req, res, sessions, sid);
       return;
     }
@@ -387,7 +435,10 @@ async function readJsonBody(
   }
 }
 
-/** PUT /api/sessions/:id { name } — rename a session. */
+/**
+ * `PUT`/`PATCH` `/api/sessions/:id` — rename a session. Body: `{ name: string }`
+ * (1–100 chars). Responds with the updated session snapshot.
+ */
 async function handleSessionRename(
   req: IncomingMessage,
   res: ServerResponse,
@@ -405,7 +456,8 @@ async function handleSessionRename(
     sendJson(res, 404, { error: 'session not found' });
     return;
   }
-  sendJson(res, 200, { ok: true });
+  const session = sessions.list().find((s) => s.id === sid);
+  sendJson(res, 200, { session });
 }
 
 async function handleSettingsUpdate(
