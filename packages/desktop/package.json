@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "author": "Pilot",
   "description": "Pilot desktop app — self-contained Electron wrapper for the Pilot daemon. macOS + Windows + Linux.",
+  "homepage": "https://github.com/jordansoper/Pilot",
   "main": "main.cjs",
   "scripts": {
     "start": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && electron .",
@@ -31,22 +32,17 @@
     "productName": "Pilot",
     "npmRebuild": false,
     "afterPack": "build/after-pack.cjs",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": [
         {
           "target": "dmg",
-          "arch": [
-            "arm64",
-            "x64"
-          ]
+          "arch": ["universal"]
         },
         {
           "target": "zip",
-          "arch": [
-            "arm64",
-            "x64"
-          ]
+          "arch": ["universal"]
         }
       ],
       "hardenedRuntime": true,
@@ -104,7 +100,7 @@
       "synopsis": "Remote terminal sessions from your phone"
     },
     "asarUnpack": [
-      "node_modules/**"
+      "node_modules/node-pty/**"
     ],
     "files": [
       "main.cjs",
