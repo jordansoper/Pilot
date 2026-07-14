@@ -42,6 +42,7 @@ jobs:
               packages/desktop/dist/*.deb
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
