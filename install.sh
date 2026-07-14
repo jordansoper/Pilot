@@ -447,6 +447,50 @@ build_pilot() {
   ok "Pilot CLI built successfully"
 }
 
+# ── PATH ──────────────────────────────────────────────────────────────────
+
+# Writes a small wrapper (not a symlink — dist/index.js has no shebang or
+# +x bit, and tsc rewrites it on every rebuild) so `pilot` works as a plain
+# command, e.g. `pilot --pair` on a headless box.
+link_pilot_bin() {
+  section "Linking pilot onto PATH"
+
+  local node_bin wrapper target
+  node_bin="$(which node 2>/dev/null || echo node)"
+  wrapper="#!/usr/bin/env bash
+exec \"$node_bin\" \"$PILOT_HOME/packages/cli/dist/index.js\" \"\$@\"
+"
+
+  # Prefer /usr/local/bin (system-wide, on PATH for every shell including
+  # root) over ~/.local/bin (user-only, and often not on PATH by default —
+  # especially for root, who runs most of these curl|bash installs).
+  target="/usr/local/bin/pilot"
+  if [ "$(id -u)" -eq 0 ] || [ -w /usr/local/bin ]; then
+    printf '%s' "$wrapper" > "$target" && chmod +x "$target"
+  elif has_cmd sudo; then
+    printf '%s' "$wrapper" | sudo tee "$target" >/dev/null && sudo chmod +x "$target"
+  fi
+
+  if [ -x "$target" ]; then
+    ok "pilot linked to $target"
+    return
+  fi
+
+  # No root/sudo — fall back to a user-writable dir.
+  mkdir -p "$HOME/.local/bin"
+  target="$HOME/.local/bin/pilot"
+  printf '%s' "$wrapper" > "$target" && chmod +x "$target"
+  ok "pilot linked to $target"
+
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *)
+      warn "$HOME/.local/bin isn't on PATH. Add this to your shell profile:"
+      warn "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+      ;;
+  esac
+}
+
 # ── systemd user unit ──────────────────────────────────────────────────────
 
 SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
@@ -613,6 +657,7 @@ print_success() {
   echo "  2. Open the Pilot app on your phone."
   echo "  3. Tap '+' to add a machine, then scan the QR code displayed at:"
   echo -e "     ${BLUE}http://localhost:$PILOT_PORT/${NC}"
+  echo "     ...or re-print it any time with: pilot --pair"
   echo ""
   echo -e "  ${BOLD}Manage the daemon:${NC}"
   if has_systemd_user; then
@@ -663,6 +708,7 @@ main() {
   install_tailscale
   install_pilot
   build_pilot
+  link_pilot_bin
   install_systemd_unit
   start_daemon
   print_success
