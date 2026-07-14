@@ -12,7 +12,6 @@ import { TOOLS_PATH } from '@pilot/shared';
 import { TopBar } from '../components/TopBar.js';
 import { apiGet } from '../api.js';
 import { listMachines } from '../storage.js';
-import type { PairedMachine } from '../types.js';
 
 export interface ToolPickerScreenProps {
   machineId: string;
@@ -26,14 +25,12 @@ export function ToolPickerScreen({
   onBack,
   onPick,
 }: ToolPickerScreenProps) {
-  const [machine, setMachine] = useState<PairedMachine | null>(null);
   const [tools, setTools] = useState<ToolsResponse['tools'] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
     const m = (await listMachines()).find((x) => x.id === machineId) ?? null;
-    setMachine(m);
     if (!m) {
       setError('Machine no longer paired.');
       return;

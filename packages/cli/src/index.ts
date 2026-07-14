@@ -116,7 +116,7 @@ FLAGS
   -h, --help         Print this help
 
 ENVIRONMENT
-  PILOT_FS_ROOT      Folder-browser allowlist root (default: \$HOME)
+  PILOT_FS_ROOT      Folder-browser allowlist root (default: $HOME)
   PILOT_DEBUG=1      Log every HTTP request to stderr (off by default)
 
 FILES

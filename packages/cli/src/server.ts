@@ -14,7 +14,6 @@ import {
   SESSIONS_PATH,
   SETTINGS_PATH,
   SessionUpdateSchema,
-  SettingsResponseSchema,
   SettingsUpdateSchema,
   SHARED_PACKAGE_VERSION,
   TOOLS_PATH,
@@ -27,7 +26,6 @@ import {
 } from '@pilot/shared';
 import { checkBearer } from './auth.js';
 import { getLauncher, listLaunchersWithAvailability } from './launchers.js';
-import { logError } from './log.js';
 import { buildPairingPageHtml, type PairingAddress } from './pairing-page.js';
 import { SessionManager } from './sessions.js';
 

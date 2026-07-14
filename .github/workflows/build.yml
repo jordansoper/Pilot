@@ -53,6 +53,12 @@ jobs:
           node-version: 22
           cache: pnpm
 
+      # node-gyp's bundled gyp still imports distutils, which Python 3.12
+      # (the runner default) removed — pin 3.11 so native rebuilds work.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       # Runs each package's postinstall, including electron-builder
       # install-app-deps in @pilot/desktop (rebuilds node-pty for Electron).
       - run: pnpm install --frozen-lockfile
