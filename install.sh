@@ -407,8 +407,20 @@ build_pilot() {
 
   cd "$PILOT_HOME"
 
+  # Scoped to @pilot/cli and its dependencies (pulls in @pilot/shared too).
+  # A plain workspace-wide `pnpm install` also installs packages/desktop's
+  # devDependencies (electron, electron-builder) purely to run this daemon,
+  # which drags in native rebuilds (node-pty for Electron's ABI, plus the
+  # incidental dtrace-provider gyp step) that can hang or fail on a server
+  # without a full C++ toolchain — and none of it is needed here.
+  #
+  # node-linker is also forced to "isolated" here, overriding the repo's
+  # .npmrc (which sets "hoisted" for Expo/React Native's benefit) — hoisted
+  # mode flattens the whole workspace into one node_modules regardless of
+  # --filter, so without this override the desktop deps get pulled in anyway.
   log "Installing dependencies (pnpm install)..."
-  pnpm install --frozen-lockfile 2>/dev/null || pnpm install
+  pnpm install --frozen-lockfile --filter "@pilot/cli..." --config.node-linker=isolated 2>/dev/null \
+    || pnpm install --filter "@pilot/cli..." --config.node-linker=isolated
 
   # The postinstall script (scripts/fix-node-pty-perms.mjs) runs automatically
   # after pnpm install and fixes the spawn-helper +x bit dropped by pnpm's store.
@@ -614,7 +626,7 @@ print_success() {
   fi
   echo ""
   echo -e "  ${BOLD}Update Pilot:${NC}"
-  echo "    cd $PILOT_HOME && git pull && pnpm install && pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build"
+  echo "    cd $PILOT_HOME && git pull && pnpm install --filter '@pilot/cli...' --config.node-linker=isolated && pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build"
   if has_systemd_user; then
     echo "    systemctl --user restart pilot-cli"
   fi
