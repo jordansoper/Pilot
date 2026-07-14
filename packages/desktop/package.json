@@ -7,7 +7,7 @@
   "main": "main.cjs",
   "scripts": {
     "start": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && electron .",
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "electron-builder install-app-deps || echo \"[desktop] native rebuild skipped — only needed to build/run the desktop app itself\"",
     "rebuild": "pnpm exec @electron/rebuild",
     "package": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && pnpm exec electron-builder --mac",
     "package:dir": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && pnpm exec electron-builder --mac --dir",
