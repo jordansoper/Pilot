@@ -37,8 +37,5 @@ Thumbs.db
 # Test coverage
 coverage/
 
-# Generated lockfiles (keep root pnpm-lock.yaml)
-**/pnpm-lock.yaml
-
 # Claude Code local settings
 .claude/settings.local.json
