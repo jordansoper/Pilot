@@ -78,7 +78,7 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
   function wsUrl() {
     var u = 'ws://' + HOST + ':' + PORT + '/ws/pty'
       + '?cwd=' + encodeURIComponent(CWD)
-      + '&tool=bash'
+      + '&tool=__TOOL__'
       + '&cols=' + term.cols
       + '&rows=' + term.rows;
     if (currentSession) u += '&session=' + encodeURIComponent(currentSession);
@@ -161,6 +161,7 @@ function renderHtml(opts: {
   cols: number;
   rows: number;
   session: string;
+  tool: string;
 }): string {
   return TERMINAL_HTML_TEMPLATE.replace(/__([A-Z]+)__/g, (_, key: string) => {
     switch (key) {
@@ -178,6 +179,8 @@ function renderHtml(opts: {
         return String(opts.rows);
       case 'SESSION':
         return opts.session;
+      case 'TOOL':
+        return opts.tool;
       default:
         return '';
     }
@@ -193,6 +196,8 @@ export interface TerminalScreenProps {
   sessionId?: string;
   /** Working directory for a NEW session (from the folder picker). */
   cwd?: string;
+  /** Tool id (defaults to 'bash' if not provided). */
+  tool?: string;
   onBack: () => void;
 }
 
@@ -200,11 +205,14 @@ export function TerminalScreen({
   machineId,
   sessionId,
   cwd,
+  tool = 'bash',
   onBack,
 }: TerminalScreenProps) {
   const [machine, setMachine] = useState<PairedMachine | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('connecting…');
+
+  const [reconnectKey, setReconnectKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -243,9 +251,8 @@ export function TerminalScreen({
 
   if (error) {
     return (
-      <View style={styles.root}>
-        <Header onBack={onBack} status={status} />
-        <View style={styles.center}>
+      <View style={styles.root}>      <Header onBack={onBack} status={status} onRefresh={() => setReconnectKey((k) => k + 1)} />
+      <View style={styles.center}>
           <Text style={styles.errTitle}>Cannot open terminal</Text>
           <Text style={styles.errBody}>{error}</Text>
         </View>
@@ -256,7 +263,7 @@ export function TerminalScreen({
   if (!machine) {
     return (
       <View style={styles.root}>
-        <Header onBack={onBack} status={status} />
+        <Header onBack={onBack} status={status} onRefresh={() => setReconnectKey((k) => k + 1)} />
         <View style={styles.center}>
           <Text style={styles.muted}>Loading…</Text>
         </View>
@@ -274,11 +281,12 @@ export function TerminalScreen({
     cols: 80,
     rows: 24,
     session: sessionId ?? '',
+    tool,
   });
 
   return (
     <View style={styles.root}>
-      <Header onBack={onBack} status={status} />
+      <Header onBack={onBack} status={status} onRefresh={() => setReconnectKey((k) => k + 1)} />
       <View style={styles.web}>
         <WebView
           style={styles.web}
@@ -294,20 +302,33 @@ export function TerminalScreen({
           // Stable within a mount so backgrounding doesn't reset the terminal;
           // keyed by the specific session/cwd so opening a different session
           // gets a fresh WebView.
-          key={`${machine.id}|${sessionId ?? `new:${cwd ?? ''}`}`}
+          key={`${machine.id}|${sessionId ?? `new:${cwd ?? ''}`}|${tool}|r${reconnectKey}`}
         />
       </View>
     </View>
   );
 }
 
-function Header({ onBack, status }: { onBack: () => void; status: string }) {
+function Header({
+  onBack,
+  status,
+  onRefresh,
+}: {
+  onBack: () => void;
+  status: string;
+  onRefresh?: () => void;
+}) {
   return (
     <View style={styles.header}>
       <TouchableOpacity onPress={onBack} style={styles.backBtn}>
         <Text style={styles.backText}>‹ Machines</Text>
       </TouchableOpacity>
       <Text style={styles.status}>{status}</Text>
+      {onRefresh ? (
+        <TouchableOpacity onPress={onRefresh} style={styles.refreshBtn}>
+          <Text style={styles.refreshText}>↻</Text>
+        </TouchableOpacity>
+      ) : null}
     </View>
   );
 }
@@ -331,6 +352,8 @@ const styles = StyleSheet.create({
   },
   backBtn: { padding: 4, paddingRight: 12 },
   backText: { color: '#9ca3af', fontSize: 14 },
+  refreshBtn: { padding: 4 },
+  refreshText: { color: '#0ea5e9', fontSize: 18 },
   status: { color: '#9ca3af', fontSize: 12, flex: 1, textAlign: 'right' },
   bar: {
     paddingHorizontal: 12,

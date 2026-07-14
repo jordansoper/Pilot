@@ -1,5 +1,6 @@
 import process from 'node:process';
 import { spawn as ptySpawn, type IPty } from 'node-pty';
+import { execSync } from 'node:child_process';
 import type { PtyHelloQuery } from '@pilot/shared';
 
 /** Per-spawn context derived from the WS handshake. */
@@ -53,8 +54,73 @@ const bashLauncher: Launcher = {
   },
 };
 
+/** Simple `which` check — returns true if the binary is on PATH. */
+function hasBin(name: string): boolean {
+  try {
+    execSync(`which ${name}`, { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ollama launcher — `ollama run <model>` or plain `ollama` if no model given.
+ */
+const ollamaLauncher: Launcher = {
+  id: 'ollama',
+  label: 'Ollama',
+  spawn(ctx, hello) {
+    const args = hello.model ? ['run', hello.model] : [];
+    return ptySpawn('ollama', args, {
+      name: 'xterm-256color',
+      cols: ctx.cols,
+      rows: ctx.rows,
+      cwd: ctx.cwd,
+      env: ctx.env ?? process.env,
+    });
+  },
+};
+
+/**
+ * Claude Code launcher — the `claude` CLI from Anthropic.
+ */
+const claudeCodeLauncher: Launcher = {
+  id: 'claude-code',
+  label: 'Claude Code',
+  spawn(ctx, _hello) {
+    return ptySpawn('claude', [], {
+      name: 'xterm-256color',
+      cols: ctx.cols,
+      rows: ctx.rows,
+      cwd: ctx.cwd,
+      env: ctx.env ?? process.env,
+    });
+  },
+};
+
+/**
+ * Freebuff launcher — the `freebuff` CLI AI coding agent.
+ */
+const freebuffLauncher: Launcher = {
+  id: 'freebuff',
+  label: 'Freebuff',
+  spawn(ctx, _hello) {
+    return ptySpawn('freebuff', [], {
+      name: 'xterm-256color',
+      cols: ctx.cols,
+      rows: ctx.rows,
+      cwd: ctx.cwd,
+      env: ctx.env ?? process.env,
+    });
+  },
+};
+
 const launchers: ReadonlyMap<string, Launcher> = new Map([
   [bashLauncher.id, bashLauncher],
+  [ollamaLauncher.id, ollamaLauncher],
+  [claudeCodeLauncher.id, claudeCodeLauncher],
+  [freebuffLauncher.id, freebuffLauncher],
 ]);
 
 export function getLauncher(id: string): Launcher | undefined {
@@ -63,4 +129,17 @@ export function getLauncher(id: string): Launcher | undefined {
 
 export function listLaunchers(): readonly Launcher[] {
   return Array.from(launchers.values());
+}
+
+/** List all launchers with live availability checks. */
+export function listLaunchersWithAvailability(): Array<{
+  id: string;
+  label: string;
+  available: boolean;
+}> {
+  return Array.from(launchers.values()).map((l) => ({
+    id: l.id,
+    label: l.label,
+    available: l.id === 'bash' || hasBin(l.id),
+  }));
 }

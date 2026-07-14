@@ -12,14 +12,22 @@ import {
   PROTOCOL_VERSION,
   PtyHelloQuerySchema,
   SESSIONS_PATH,
+  SETTINGS_PATH,
+  SessionUpdateSchema,
+  SettingsResponseSchema,
+  SettingsUpdateSchema,
   SHARED_PACKAGE_VERSION,
+  TOOLS_PATH,
   WS_PATH,
   type FsResponse,
   type HealthResponse,
   type PtyHelloQuery,
+  type SettingsResponse,
+  type SettingsUpdateResponse,
 } from '@pilot/shared';
 import { checkBearer } from './auth.js';
-import { getLauncher } from './launchers.js';
+import { getLauncher, listLaunchersWithAvailability } from './launchers.js';
+import { logError } from './log.js';
 import { buildPairingPageHtml, type PairingAddress } from './pairing-page.js';
 import { SessionManager } from './sessions.js';
 
@@ -56,6 +64,15 @@ export interface RunningServer {
   close: () => Promise<void>;
 }
 
+/** Mutable daemon settings, updated via PUT /api/settings. */
+export interface DaemonSettings {
+  port: number;
+  bind: string;
+  name: string;
+  fsRoot: string;
+  tailscaleIp: string | null;
+}
+
 /**
  * Normalize any ws RawData variant to a Buffer for term.write. In Node
  * `ws@8` binary frames arrive as `Buffer`, but we narrow defensively so an
@@ -85,8 +102,19 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         opts.pairingAddresses ?? [],
       )
     : null;
+  // Mutable daemon settings — fsRoot resolved once at startup, but
+  // overridable via PUT /api/settings (name/fsRoot take effect immediately;
+  // port/bind require restart).
+  const settings: DaemonSettings = {
+    port: actualPort,
+    bind: opts.bind,
+    name: opts.machineName ?? 'this machine',
+    fsRoot: path.resolve(process.env[FS_ALLOWLIST_ROOT_ENV] || homedir()),
+    tailscaleIp: opts.tailscaleIp,
+  };
+
   const httpServer = createServer((req, res) => {
-    handleHttp(req, res, opts, actualPort, pairingPageHtml, sessions);
+    handleHttp(req, res, opts, actualPort, pairingPageHtml, sessions, settings);
   });
 
   const wss = new WebSocketServer({
@@ -191,14 +219,17 @@ function debugLog(req: IncomingMessage, kind: string): void {
   );
 }
 
-/** Allowlist root for `/api/fs` — nothing above this is browsable. */
-function fsRoot(): string {
-  return path.resolve(process.env[FS_ALLOWLIST_ROOT_ENV] || homedir());
+/**
+ * Resolve the effective FS allowlist root. Settings take precedence over
+ * the env var; env var takes precedence over $HOME.
+ */
+function resolveFsRoot(settings: DaemonSettings): string {
+  return path.resolve(settings.fsRoot);
 }
 
 /** Browse a directory under the allowlist root. Ends the response. */
-async function handleFs(res: ServerResponse, url: URL): Promise<void> {
-  const root = fsRoot();
+async function handleFs(res: ServerResponse, url: URL, settings: DaemonSettings): Promise<void> {
+  const root = resolveFsRoot(settings);
   const requested = url.searchParams.get('path');
   const resolved = requested ? path.resolve(requested) : root;
   // Reject anything outside the root (path-escape protection).
@@ -229,6 +260,7 @@ function handleHttp(
   actualPort: number,
   pairingPageHtml: string | null,
   sessions: SessionManager,
+  settings: DaemonSettings,
 ): void {
   debugLog(req, 'HTTP');
   const url = new URL(req.url ?? '/', `http://${opts.bind}:${actualPort}`);
@@ -251,32 +283,177 @@ function handleHttp(
     return;
   }
 
-  if (req.method !== 'GET') {
+  // ── Per-session routes: /api/sessions/<uuid> ────────────────────
+  const sessionMatch = /^\/api\/sessions\/([0-9a-f-]{36})$/.exec(url.pathname);
+  if (sessionMatch?.[1]) {
+    const sid = sessionMatch[1];
+    if (req.method === 'DELETE') {
+      sessions.remove(sid);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === 'PUT') {
+      void handleSessionRename(req, res, sessions, sid);
+      return;
+    }
     sendJson(res, 405, { error: 'method not allowed' });
     return;
   }
-  if (url.pathname === HEALTH_PATH) {
-    // process.uptime() is monotonic; Date.now() can jump on NTP corrections.
-    // actualPort (not opts.port) so a smoke test using port=0 reports the
-    // OS-assigned ephemeral value.
-    const body: HealthResponse = {
-      version: SHARED_PACKAGE_VERSION,
-      uptimeMs: Math.round(process.uptime() * 1000),
-      tailscaleIp: opts.tailscaleIp,
+
+  // ── GET routes ──────────────────────────────────────────────────
+  if (req.method === 'GET') {
+    if (url.pathname === HEALTH_PATH) {
+      const body: HealthResponse = {
+        version: SHARED_PACKAGE_VERSION,
+        uptimeMs: Math.round(process.uptime() * 1000),
+        tailscaleIp: opts.tailscaleIp,
+        port: actualPort,
+      };
+      sendJson(res, 200, body);
+      return;
+    }
+    if (url.pathname === SESSIONS_PATH) {
+      sendJson(res, 200, { sessions: sessions.list() });
+      return;
+    }
+    if (url.pathname === FS_PATH) {
+      void handleFs(res, url, settings);
+      return;
+    }
+    if (url.pathname === SETTINGS_PATH) {
+      const body: SettingsResponse = {
+        port: actualPort,
+        bind: settings.bind,
+        name: settings.name,
+        fsRoot: settings.fsRoot,
+        tailscaleIp: opts.tailscaleIp,
+      };
+      sendJson(res, 200, body);
+      return;
+    }
+    if (url.pathname === TOOLS_PATH) {
+      sendJson(res, 200, { tools: listLaunchersWithAvailability() });
+      return;
+    }
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+
+  // ── PUT /api/settings ───────────────────────────────────────────
+  if (req.method === 'PUT' && url.pathname === SETTINGS_PATH) {
+    void handleSettingsUpdate(req, res, settings, opts, actualPort);
+    return;
+  }
+
+  sendJson(res, 405, { error: 'method not allowed' });
+}
+
+// ── PUT /api/settings ────────────────────────────────────────────────────
+
+/** Max request body size for PUT requests (64 KB). */
+const BODY_MAX = 64 * 1024;
+
+/** Read JSON body from an incoming request, bounded. */
+async function readJsonBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<Record<string, unknown> | null> {
+  let body = '';
+  let size = 0;
+  try {
+    body = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > BODY_MAX) {
+          req.destroy();
+          reject(new Error('body too large'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', reject);
+    });
+  } catch {
+    sendJson(res, 413, { error: 'request body too large or unreadable' });
+    return null;
+  }
+  try {
+    return JSON.parse(body) as Record<string, unknown>;
+  } catch {
+    sendJson(res, 400, { error: 'invalid JSON' });
+    return null;
+  }
+}
+
+/** PUT /api/sessions/:id { name } — rename a session. */
+async function handleSessionRename(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessions: SessionManager,
+  sid: string,
+): Promise<void> {
+  const parsed = await readJsonBody(req, res);
+  if (!parsed) return;
+  const result = SessionUpdateSchema.safeParse(parsed);
+  if (!result.success) {
+    sendJson(res, 400, { error: 'invalid body', issues: result.error.issues });
+    return;
+  }
+  if (!sessions.rename(sid, result.data.name)) {
+    sendJson(res, 404, { error: 'session not found' });
+    return;
+  }
+  sendJson(res, 200, { ok: true });
+}
+
+async function handleSettingsUpdate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  settings: DaemonSettings,
+  opts: ServerOptions,
+  actualPort: number,
+): Promise<void> {
+  const parsed = await readJsonBody(req, res);
+  if (!parsed) return;
+
+  const result = SettingsUpdateSchema.safeParse(parsed);
+  if (!result.success) {
+    sendJson(res, 400, { error: 'invalid settings', issues: result.error.issues });
+    return;
+  }
+
+  const update = result.data;
+  const restartReasons: string[] = [];
+
+  if (update.name !== undefined) {
+    settings.name = update.name;
+  }
+  if (update.fsRoot !== undefined) {
+    settings.fsRoot = path.resolve(update.fsRoot);
+  }
+  if (update.port !== undefined) {
+    settings.port = update.port;
+    restartReasons.push('port');
+  }
+  if (update.bind !== undefined) {
+    settings.bind = update.bind;
+    restartReasons.push('bind');
+  }
+
+  const response: SettingsUpdateResponse = {
+    settings: {
       port: actualPort,
-    };
-    sendJson(res, 200, body);
-    return;
-  }
-  if (url.pathname === SESSIONS_PATH) {
-    sendJson(res, 200, { sessions: sessions.list() });
-    return;
-  }
-  if (url.pathname === FS_PATH) {
-    void handleFs(res, url);
-    return;
-  }
-  sendJson(res, 404, { error: 'not found' });
+      bind: settings.bind,
+      name: settings.name,
+      fsRoot: settings.fsRoot,
+      tailscaleIp: opts.tailscaleIp,
+    },
+    needsRestart: restartReasons.length > 0,
+    restartReasons,
+  };
+  sendJson(res, 200, response);
 }
 
 // ─────────────────────────────────────────────────────────────────────────

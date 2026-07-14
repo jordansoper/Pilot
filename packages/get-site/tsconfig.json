@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "lib": ["ES2022"],
+    // Worker globals (Request, Response, fetch, crypto.subtle, caches, URL,
+    // Headers) come from @cloudflare/workers-types, hoisted by wrangler.
+    // The package's `index.d.ts` exposes the current LTS runtime types.
+    "types": ["@cloudflare/workers-types"],
+    "moduleResolution": "Bundler",
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"],
+  // src/install-bundled.ts is intentionally included so tsc can resolve the
+  // constants imported by worker.ts / install.ts / landing.ts. The file is
+  // .gitignored and regenerated on every install/build (~22 KB).
+  "exclude": [
+    "scripts",
+    "dist",
+    ".wrangler",
+    "node_modules"
+  ]
+}

@@ -52,5 +52,6 @@ export type Screen =
   | { name: 'addMachine' }
   | { name: 'settings' }
   | { name: 'sessions'; machineId: string }
-  | { name: 'filePicker'; machineId: string }
-  | { name: 'terminal'; machineId: string; sessionId?: string; cwd?: string };
+  | { name: 'toolPicker'; machineId: string }
+  | { name: 'filePicker'; machineId: string; tool: string }
+  | { name: 'terminal'; machineId: string; sessionId?: string; cwd?: string; tool?: string };

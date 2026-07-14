@@ -13,6 +13,7 @@ import { AddMachineScreen } from './src/screens/AddMachineScreen.js';
 import { SettingsScreen } from './src/screens/SettingsScreen.js';
 import { SessionsScreen } from './src/screens/SessionsScreen.js';
 import { FilePickerScreen } from './src/screens/FilePickerScreen.js';
+import { ToolPickerScreen } from './src/screens/ToolPickerScreen.js';
 import { TerminalScreen } from './src/screens/TerminalScreen.js';
 
 const HOME: Screen = { name: 'machines' };
@@ -76,7 +77,16 @@ export default function App() {
           onOpenSession={(sessionId) =>
             push({ name: 'terminal', machineId: current.machineId, sessionId })
           }
-          onNewSession={() => push({ name: 'filePicker', machineId: current.machineId })}
+          onNewSession={() => push({ name: 'toolPicker', machineId: current.machineId })}
+        />
+      )}
+      {current.name === 'toolPicker' && (
+        <ToolPickerScreen
+          machineId={current.machineId}
+          onBack={back}
+          onPick={(tool) =>
+            push({ name: 'filePicker', machineId: current.machineId, tool })
+          }
         />
       )}
       {current.name === 'filePicker' && (
@@ -84,7 +94,7 @@ export default function App() {
           machineId={current.machineId}
           onBack={back}
           onPick={(cwd) =>
-            replace({ name: 'terminal', machineId: current.machineId, cwd })
+            replace({ name: 'terminal', machineId: current.machineId, cwd, tool: current.tool })
           }
         />
       )}
@@ -93,6 +103,7 @@ export default function App() {
           machineId={current.machineId}
           sessionId={current.sessionId}
           cwd={current.cwd}
+          tool={current.tool}
           onBack={back}
         />
       )}

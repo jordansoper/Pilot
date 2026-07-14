@@ -20,6 +20,8 @@ export interface PtySession {
   tool: string;
   /** Unix epoch ms when created. */
   createdMs: number;
+  /** Optional human-readable name set by the user. */
+  name?: string;
   /** Bounded tail of PTY output, replayed when a client re-attaches. */
   buffer: string;
   /** Current output sink (the attached WebSocket), or null when detached. */
@@ -140,6 +142,7 @@ export class SessionManager {
     tool: string;
     createdMs: number;
     attached: boolean;
+    name?: string;
   }> {
     return [...this.sessions.values()]
       .filter((s) => s.alive)
@@ -150,7 +153,15 @@ export class SessionManager {
         tool: s.tool,
         createdMs: s.createdMs,
         attached: s.attached,
+        name: s.name,
       }));
+  }
+
+  rename(id: string, name: string): boolean {
+    const s = this.sessions.get(id);
+    if (!s) return false;
+    s.name = name;
+    return true;
   }
 
   closeAll(): void {

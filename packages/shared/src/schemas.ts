@@ -76,6 +76,8 @@ export const SessionInfoSchema = z.object({
   createdMs: z.number().int().nonnegative(),
   /** Whether a client is currently attached. */
   attached: z.boolean(),
+  /** Optional human-readable name set by the user. */
+  name: z.string().min(1).max(100).optional(),
 });
 
 /** Response payload of `GET /api/sessions`. */
@@ -93,6 +95,47 @@ export const HealthResponseSchema = z.object({
   tailscaleIp: z.string().nullable(),
   /** TCP port the daemon listens on. */
   port: z.number().int().positive(),
+});
+
+/** Response payload of `GET /api/settings`. */
+export const SettingsResponseSchema = z.object({
+  /** Current listen port. */
+  port: z.number().int().positive().max(65535),
+  /** Current bind address. */
+  bind: z.string().min(1),
+  /** Friendly machine name shown in the QR. */
+  name: z.string().min(1).max(100),
+  /** Folder-browser allowlist root (absolute path). */
+  fsRoot: z.string().min(1),
+  /** Resolved Tailscale IP, or null if not on a tailnet (read-only). */
+  tailscaleIp: z.string().nullable(),
+});
+
+/** Request body for `PUT /api/settings` — all fields optional. */
+export const SettingsUpdateSchema = z.object({
+  /** New listen port (requires daemon restart to take effect). */
+  port: z.number().int().positive().max(65535).optional(),
+  /** New bind address (requires daemon restart to take effect). */
+  bind: z.string().min(1).optional(),
+  /** New machine name (takes effect immediately). */
+  name: z.string().min(1).max(100).optional(),
+  /** New folder-browser allowlist root (takes effect immediately). */
+  fsRoot: z.string().min(1).optional(),
+});
+
+/** Response payload of `PUT /api/settings`. */
+export const SettingsUpdateResponseSchema = z.object({
+  /** Updated settings after applying the patch. */
+  settings: SettingsResponseSchema,
+  /** Whether the daemon needs to be restarted for some changes to apply. */
+  needsRestart: z.boolean(),
+  /** Human-readable list of fields that triggered the restart requirement. */
+  restartReasons: z.array(z.string()),
+});
+
+/** Request body for `PUT /api/sessions/:id` — rename a session. */
+export const SessionUpdateSchema = z.object({
+  name: z.string().min(1).max(100),
 });
 
 /**

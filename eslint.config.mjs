@@ -41,9 +41,55 @@ export default [
     },
   },
 
-  // Repo tooling scripts (Node globals)
+  // Cloudflare Worker runtime — Worker globals (Request/Response/fetch/
+  // crypto/caches/URL/Headers) instead of Node's `process`/`Buffer`.
   {
-    files: ['scripts/**/*.{js,mjs}'],
+    files: ['packages/get-site/src/**/*.ts'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: {
+        // Worker runtime types
+        Request: 'readonly',
+        Response: 'readonly',
+        Headers: 'readonly',
+        URL: 'readonly',
+        URLSearchParams: 'readonly',
+        URLPattern: 'readonly',
+        fetch: 'readonly',
+        FormData: 'readonly',
+        crypto: 'readonly',
+        Crypto: 'readonly',
+        SubtleCrypto: 'readonly',
+        Cache: 'readonly',
+        CacheStorage: 'readonly',
+        ExecutionContext: 'readonly',
+        ExportedHandler: 'readonly',
+        // Service Worker event handlers (only used by scheduled workers,
+        // but harmless to expose here)
+        addEventListener: 'readonly',
+        Event: 'readonly',
+        ExtendableEvent: 'readonly',
+        ScheduledEvent: 'readonly',
+      },
+    },
+    rules: {
+      '@typescript-eslint/consistent-type-imports': 'error',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
+    },
+  },
+
+  // Repo tooling scripts (Node globals) — matches the top-level scripts/
+  // folder AND any package-local scripts/ folder (e.g. the Cloudflare Worker
+  // bundle generator at packages/get-site/scripts/).
+  {
+    files: [
+      'scripts/**/*.{js,mjs,cjs}',
+      'packages/*/scripts/**/*.{js,mjs,cjs}',
+    ],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',

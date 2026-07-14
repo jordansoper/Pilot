@@ -3,8 +3,8 @@
  * pilot-cli — Phase 1 entry point.
  *
  * Boots a daemon that prints a `pilot://pair` QR (for the app to scan),
- * runs on the user's Tailscale IP, and serves a tiny HTTP+WS control plane
- * the Expo app uses to launch an AI CLI in a chosen folder.
+ * runs on the user's Tailscale IP (or 0.0.0.0), and serves a tiny HTTP+WS
+ * control plane the Expo app uses to launch a shell in a chosen folder.
  *
  * See PROJECT_PLAN.md §Phase 1 for what this does and doesn't yet do.
  */
@@ -21,12 +21,18 @@ import type { PairingAddress } from './pairing-page.js';
 import { getTailscaleIp } from './tailscale.js';
 import { getLanIpv4s } from './network.js';
 import { loadOrCreateToken } from './token.js';
+import { acquireLock, releaseLock } from './lock.js';
+import { logError } from './log.js';
 
 interface CliArgs {
   port: number;
   bind: string;
+  /** true when --bind was explicitly passed (vs the DEFAULT_BIND fallback). */
+  bindExplicit: boolean;
   name: string;
   noQr: boolean;
+  /** Force-print the pairing QR even when --no-qr would suppress it. */
+  pair: boolean;
   rotateToken: boolean;
   /** Explicit host(s) to advertise in the QR, overriding auto-detection. */
   hosts: string[];
@@ -36,8 +42,10 @@ function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     port: DEFAULT_PORT,
     bind: DEFAULT_BIND,
+    bindExplicit: false,
     name: hostname(),
     noQr: false,
+    pair: false,
     rotateToken: false,
     hosts: [],
   };
@@ -57,6 +65,7 @@ function parseArgs(argv: string[]): CliArgs {
       case '--bind':
       case '-b':
         args.bind = String(next());
+        args.bindExplicit = true;
         break;
       case '--name':
       case '-n':
@@ -64,6 +73,9 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case '--no-qr':
         args.noQr = true;
+        break;
+      case '--pair':
+        args.pair = true;
         break;
       case '--host':
         // Repeatable: --host 192.168.1.20 --host 100.x.y.z
@@ -88,22 +100,50 @@ function printHelp(): void {
   console.log(
     `pilot-cli v${SHARED_PACKAGE_VERSION} (protocol v${PROTOCOL_VERSION})
 
-Usage:
+USAGE
   pilot [flags]
 
-Flags:
-  --port, -p <n>   TCP port to listen on (default ${DEFAULT_PORT}, 0 = ephemeral)
-  --bind, -b <ip>  IP to bind to (default ${DEFAULT_BIND})
-  --name, -n <s>   Friendly machine name in the QR (default: hostname)
-  --no-qr          Print pairing URL but skip the ASCII QR (for headless)
-  --host <ip>      Advertise this address in the QR (repeatable). Overrides
-                   auto-detection. Default: Tailscale IP + LAN IP(s), so one
-                   QR works on the same Wi-Fi and remotely.
-  --rotate-token   Generate a fresh token (invalidates existing pairings)
-  -h, --help       Print this help
+FLAGS
+  --port, -p <n>     TCP port (default ${DEFAULT_PORT}; 0 = OS picks ephemeral)
+  --bind, -b <ip>    IP to bind (default: Tailscale IP or ${DEFAULT_BIND})
+  --name, -n <s>     Machine name shown in the QR (default: hostname)
+  --no-qr            Print pairing URL only — skip the ASCII QR
+  --pair             Force-print the pairing QR (e.g. on a headless server)
+  --host <ip>        Advertise this address in the QR (repeatable; default:
+                     auto-detect Tailscale IP + LAN IPs, then fall back to
+                     the bind address)
+  --rotate-token     Revoke all pairings and generate a new token
+  -h, --help         Print this help
 
-The pairing token is persisted to ~/.pilot/token so a paired phone keeps
-working across restarts. Use --rotate-token to revoke and re-pair.
+ENVIRONMENT
+  PILOT_FS_ROOT      Folder-browser allowlist root (default: \$HOME)
+  PILOT_DEBUG=1      Log every HTTP request to stderr (off by default)
+
+FILES
+  ~/.pilot/token       Persistent pairing token (0600, 32 random bytes hex)
+  ~/.pilot/daemon.lock  PID lock file — prevents accidental double-start
+
+EXAMPLES
+  # Start the daemon — picks Tailscale IP (or 0.0.0.0) + port ${DEFAULT_PORT}
+  pilot
+
+  # Headless server — no ASCII art in the logs
+  pilot --no-qr
+
+  # Headless server — re-print QR for pairing from a remote terminal
+  pilot --pair
+
+  # Localhost-only, custom port (e.g. behind a reverse proxy)
+  pilot --bind 127.0.0.1 --port 8080
+
+  # Revoke all existing pairings
+  pilot --rotate-token
+
+  # Explicitly advertise only certain addresses
+  pilot --host 192.168.1.42 --host 100.64.0.5
+
+The pairing token persists in ~/.pilot/token so paired phones survive
+daemon restarts. Use --rotate-token to revoke and re-pair.
 `,
   );
 }
@@ -118,6 +158,19 @@ async function main(): Promise<void> {
     rotate: args.rotateToken,
   });
   const tailscaleIp = await getTailscaleIp();
+
+  // When the user didn't explicitly set --bind, prefer the Tailscale IP
+  // (more secure than 0.0.0.0). Fall back to 0.0.0.0 if not on a tailnet.
+  const effectiveBind = args.bindExplicit ? args.bind : (tailscaleIp ?? args.bind);
+
+  // Single-instance lock — refuse to start if something is already on our port.
+  const lock = await acquireLock(effectiveBind, args.port);
+  if (!lock.held) {
+    const msg = `pilot-cli: ${lock.message}`;
+    logError(msg);
+    console.error(msg);
+    process.exit(1);
+  }
 
   // Assemble every address the phone might use. One QR carries them all, and
   // the app tries each — LAN when on the same Wi-Fi (fast, no Tailscale needed),
@@ -170,16 +223,16 @@ async function main(): Promise<void> {
     console.log('⚠ Tailscale not detected — advertising LAN address(es) only.');
   }
   console.log(
-    `Listening on ${args.bind}:${args.port}  ·  Name: ${payload.name}  ·  Reachable at: ${hosts
+    `Listening on ${effectiveBind}:${args.port}  ·  Name: ${payload.name}  ·  Reachable at: ${hosts
       .map((h) => `${h}:${args.port}`)
       .join(', ')}`,
   );
-  renderPairingQr(url, { silent: args.noQr });
+  renderPairingQr(url, { silent: args.noQr && !args.pair });
 
   const server = await startServer({
     token,
     port: args.port,
-    bind: args.bind,
+    bind: effectiveBind,
     tailscaleIp,
     pairingUrl: url,
     machineName: payload.name,
@@ -194,6 +247,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log(`\nReceived ${signal}, shutting down…`);
     await server.close();
+    releaseLock();
     process.exit(0);
   };
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
@@ -201,7 +255,9 @@ async function main(): Promise<void> {
 }
 
 main().catch((err: unknown) => {
+  releaseLock();
   const message = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  logError(`fatal: ${message}`);
   console.error('fatal:', message);
   process.exit(1);
 });
