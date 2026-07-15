@@ -442,6 +442,19 @@ build_pilot() {
     rm -rf "$PILOT_HOME/node_modules"
   fi
 
+  # The .modules.yaml check above misses one case: a hoisted tree that an
+  # isolated install already ran on top of (any install before the wipe above
+  # existed). pnpm rewrites .modules.yaml to "isolated" but leaves the old
+  # hoisted package dirs sitting in node_modules, so the marker looks clean
+  # while stale copies still shadow the tree. In a pure isolated install,
+  # node-pty lives only under .pnpm/ (it's a dependency of @pilot/cli, not of
+  # the workspace root) — a real node_modules/node-pty directory can only be
+  # hoisted residue.
+  if [ -d "$PILOT_HOME/node_modules/node-pty" ] && [ ! -L "$PILOT_HOME/node_modules/node-pty" ]; then
+    warn "Stale hoisted node-pty copy found in node_modules — removing node_modules before a clean isolated install"
+    rm -rf "$PILOT_HOME/node_modules"
+  fi
+
   log "Installing dependencies (pnpm install)..."
   pnpm install --frozen-lockfile --filter "@pilot/cli..." --config.node-linker=isolated 2>/dev/null \
     || pnpm install --filter "@pilot/cli..." --config.node-linker=isolated
@@ -467,33 +480,29 @@ build_pilot() {
   # point install_system_deps() has already run, so whatever was missing
   # (python3-setuptools, build-essential, …) should now be present.
   log "Verifying node-pty native module..."
-  # node-pty's npm package ships prebuilt binaries for EVERY platform it
-  # supports, not just this one — so a bare `find … -name pty.node` would
-  # always find *something* (e.g. the bundled darwin/win32 prebuilds) even
-  # when the one this host actually needs is missing. Check the exact path
-  # node-pty itself resolves at runtime: prebuilds/<platform>-<arch>/pty.node
-  # (shipped or downloaded) or build/Release/pty.node (locally compiled).
-  local plat_arch pty_node
-  plat_arch=$(node -e 'process.stdout.write(process.platform + "-" + process.arch)')
-  pty_node=$(find "$PILOT_HOME/node_modules" -maxdepth 8 \
-    \( -path "*/prebuilds/$plat_arch/pty.node" -o -path "*/build/Release/pty.node" \) \
-    -type f 2>/dev/null | head -1)
-  if [ -z "$pty_node" ]; then
-    warn "pty.node not found for $plat_arch — retrying node-pty's native build"
-    # `pnpm rebuild` is unreliable here (it's a no-op unless pnpm's own state
-    # tracks a pending build); go straight to the source and re-run
-    # node-pty's own install script (prebuild check, falling back to
-    # node-gyp) directly in its package directory.
+  # Path-based checks (find for pty.node) are not trustworthy here: node-pty
+  # ships prebuilds for every platform it supports, and a stale hoisted copy
+  # (see above) can carry a locally-built pty.node that the runtime never
+  # loads. The only check that can't be fooled is the one the daemon itself
+  # performs — require() node-pty from the CLI package, which dlopens
+  # pty.node at require time.
+  local cli_dir="$PILOT_HOME/packages/cli"
+  if ! (cd "$cli_dir" && node -e 'require("node-pty")' 2>/dev/null); then
+    warn "node-pty can't load its native module — rebuilding it"
+    # Rebuild in the exact copy the CLI resolves at runtime (require.resolve),
+    # not whatever `find` happens to hit first — with pnpm's isolated linker
+    # (plus possible hoisted leftovers) there can be more than one node-pty
+    # directory, and rebuilding the wrong one "succeeds" while the daemon
+    # stays broken. `pnpm rebuild` is equally unreliable (a no-op unless
+    # pnpm's own state tracks a pending build), so re-run node-pty's own
+    # install script (prebuild check, falling back to node-gyp) directly.
     local node_pty_dir
-    node_pty_dir=$(find "$PILOT_HOME/node_modules" -maxdepth 6 -type d -path '*/node_modules/node-pty' 2>/dev/null | head -1)
+    node_pty_dir=$(cd "$cli_dir" && node -p 'require("path").dirname(require.resolve("node-pty/package.json"))' 2>/dev/null || true)
     if [ -z "$node_pty_dir" ] || ! (cd "$node_pty_dir" && npm run install --if-present); then
       die "node-pty failed to build a native module. Check the error above (often a missing compiler/python toolchain) and re-run this installer."
     fi
-    pty_node=$(find "$PILOT_HOME/node_modules" -maxdepth 8 \
-      \( -path "*/prebuilds/$plat_arch/pty.node" -o -path "*/build/Release/pty.node" \) \
-      -type f 2>/dev/null | head -1)
-    if [ -z "$pty_node" ]; then
-      die "node-pty still has no native module after rebuilding. Pilot cannot spawn terminal sessions without it."
+    if ! (cd "$cli_dir" && node -e 'require("node-pty")'); then
+      die "node-pty still can't load its native module after rebuilding. Pilot cannot spawn terminal sessions without it."
     fi
     ok "node-pty native module built"
   fi
