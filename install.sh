@@ -426,6 +426,22 @@ build_pilot() {
   # .npmrc (which sets "hoisted" for Expo/React Native's benefit) — hoisted
   # mode flattens the whole workspace into one node_modules regardless of
   # --filter, so without this override the desktop deps get pulled in anyway.
+  #
+  # An existing node_modules from before this override existed (or from an
+  # interrupted/older run) can still be in hoisted mode. pnpm does NOT
+  # reconcile a linker-mode switch on an existing tree — it leaves the old
+  # hoisted copies in place *alongside* the new isolated ones, so a stale
+  # node_modules/node-pty/ sits right next to the real
+  # node_modules/.pnpm/node-pty@*/node_modules/node-pty/ that @pilot/cli
+  # actually resolves at runtime. A verify-by-path check can find and
+  # "successfully rebuild" the dead one and never notice the live one is
+  # still broken. Only a clean install ever guarantees the two can't diverge.
+  if [ -f "$PILOT_HOME/node_modules/.modules.yaml" ] && \
+     ! grep -q '^nodeLinker: isolated$' "$PILOT_HOME/node_modules/.modules.yaml" 2>/dev/null; then
+    warn "Existing node_modules is in hoisted mode — removing before a clean isolated install"
+    rm -rf "$PILOT_HOME/node_modules"
+  fi
+
   log "Installing dependencies (pnpm install)..."
   pnpm install --frozen-lockfile --filter "@pilot/cli..." --config.node-linker=isolated 2>/dev/null \
     || pnpm install --filter "@pilot/cli..." --config.node-linker=isolated
