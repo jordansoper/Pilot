@@ -171,15 +171,23 @@ install_system_deps() {
       else
         run_pkg_install "apt update" apt-get update -qq
       fi
+      # python3-setuptools restores `import distutils` (removed from Python's
+      # stdlib in 3.12+ upstream, and Debian/Ubuntu never shipped a separate
+      # distutils package post-removal) via setuptools' compatibility shim —
+      # node-gyp's bundled gyp still imports it, and without it node-pty's
+      # own native compile fails silently (pnpm doesn't treat a dependency's
+      # install-script failure as fatal, so this can go unnoticed until the
+      # daemon crashes at runtime trying to load pty.node).
+      #
       # Try with libasound2t64 first (Ubuntu 24.04+), silently fall back to libasound2
       if ! run_pkg_install "build tools & Electron deps (apt)" \
         apt-get install -y -qq \
-          build-essential python3 git curl \
+          build-essential python3 python3-setuptools git curl \
           libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
           xdg-utils libgbm1 libasound2t64 2>/dev/null; then
         run_pkg_install "build tools & Electron deps (apt, fallback)" \
           apt-get install -y -qq \
-            build-essential python3 git curl \
+            build-essential python3 python3-setuptools git curl \
             libgtk-3-0 libnotify4 libnss3 libxss1 libxtst6 \
             xdg-utils libgbm1 libasound2
       fi
@@ -187,21 +195,21 @@ install_system_deps() {
     dnf)
       run_pkg_install "build tools & Electron deps (dnf)" \
         dnf install -y \
-          gcc-c++ python3 git curl \
+          gcc-c++ python3 python3-setuptools git curl \
           gtk3 libnotify nss libXScrnSaver libXtst \
           xdg-utils mesa-libgbm alsa-lib
       ;;
     pacman)
       run_pkg_install "build tools & Electron deps (pacman)" \
         pacman -Syu --noconfirm --needed \
-          base-devel python git curl \
+          base-devel python python-setuptools git curl \
           gtk3 libnotify nss libxss libxtst \
           xdg-utils mesa alsa-lib
       ;;
     zypper)
       run_pkg_install "build tools & Electron deps (zypper)" \
         zypper install -y \
-          gcc-c++ python3 git curl \
+          gcc-c++ python3 python3-setuptools git curl \
           gtk3 libnotify4 mozilla-nss libXss1 libXtst6 \
           xdg-utils libgbm1 alsa
       ;;
@@ -209,7 +217,7 @@ install_system_deps() {
       # Alpine — need build tools for node-pty (no musl prebuild)
       run_pkg_install "build tools & Electron deps (apk)" \
         apk add --no-cache \
-          build-base python3 git curl \
+          build-base python3 py3-setuptools git curl \
           gtk+3.0 libnotify nss libxscrnsaver libxtst \
           xdg-utils mesa-gbm alsa-lib
       ;;
@@ -431,6 +439,47 @@ build_pilot() {
   if [ -n "$spawn_helper" ] && [ ! -x "$spawn_helper" ]; then
     warn "spawn-helper missing +x — running fix script manually"
     node "$PILOT_HOME/scripts/fix-node-pty-perms.mjs"
+  fi
+
+  # node-pty's own install script (prebuild download, falling back to a local
+  # node-gyp compile) is a third-party dependency's script, not a workspace
+  # package's — pnpm doesn't treat its failure as fatal to the overall
+  # install, so a broken toolchain (e.g. missing distutils) can silently
+  # leave pty.node missing without the install ever reporting an error. The
+  # daemon only discovers this at runtime, when a session actually tries to
+  # spawn a shell. Verify it here and force a retry if needed — by this
+  # point install_system_deps() has already run, so whatever was missing
+  # (python3-setuptools, build-essential, …) should now be present.
+  log "Verifying node-pty native module..."
+  # node-pty's npm package ships prebuilt binaries for EVERY platform it
+  # supports, not just this one — so a bare `find … -name pty.node` would
+  # always find *something* (e.g. the bundled darwin/win32 prebuilds) even
+  # when the one this host actually needs is missing. Check the exact path
+  # node-pty itself resolves at runtime: prebuilds/<platform>-<arch>/pty.node
+  # (shipped or downloaded) or build/Release/pty.node (locally compiled).
+  local plat_arch pty_node
+  plat_arch=$(node -e 'process.stdout.write(process.platform + "-" + process.arch)')
+  pty_node=$(find "$PILOT_HOME/node_modules" -maxdepth 8 \
+    \( -path "*/prebuilds/$plat_arch/pty.node" -o -path "*/build/Release/pty.node" \) \
+    -type f 2>/dev/null | head -1)
+  if [ -z "$pty_node" ]; then
+    warn "pty.node not found for $plat_arch — retrying node-pty's native build"
+    # `pnpm rebuild` is unreliable here (it's a no-op unless pnpm's own state
+    # tracks a pending build); go straight to the source and re-run
+    # node-pty's own install script (prebuild check, falling back to
+    # node-gyp) directly in its package directory.
+    local node_pty_dir
+    node_pty_dir=$(find "$PILOT_HOME/node_modules" -maxdepth 6 -type d -path '*/node_modules/node-pty' 2>/dev/null | head -1)
+    if [ -z "$node_pty_dir" ] || ! (cd "$node_pty_dir" && npm run install --if-present); then
+      die "node-pty failed to build a native module. Check the error above (often a missing compiler/python toolchain) and re-run this installer."
+    fi
+    pty_node=$(find "$PILOT_HOME/node_modules" -maxdepth 8 \
+      \( -path "*/prebuilds/$plat_arch/pty.node" -o -path "*/build/Release/pty.node" \) \
+      -type f 2>/dev/null | head -1)
+    if [ -z "$pty_node" ]; then
+      die "node-pty still has no native module after rebuilding. Pilot cannot spawn terminal sessions without it."
+    fi
+    ok "node-pty native module built"
   fi
 
   # @pilot/shared is already built by its "prepare" script during
