@@ -26,11 +26,28 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
 <style>
   html, body { margin: 0; padding: 0; height: 100%; background: #1a1a1a; color: #d0d0d0; }
-  #term { position: absolute; inset: 0; padding: 4px; }
+  #term { position: absolute; left: 0; right: 0; top: 0; bottom: 76px; padding: 4px; }
   .xterm-viewport, .xterm-screen { background: #1a1a1a !important; }
+  /* Termux-style extra keys, pinned under the terminal (above the soft
+     keyboard — Android resizes the WebView when it opens). */
+  #keys {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 76px;
+    display: flex; flex-direction: column;
+    background: #0c0c0c; border-top: 1px solid #2a2f3a;
+  }
+  .krow { flex: 1; display: flex; }
+  .kbtn {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    color: #d0d0d0; font-family: Menlo, monospace; font-size: 12px;
+    user-select: none; -webkit-user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .kbtn:active { background: #26303f; }
+  .kbtn.on { background: #1d4ed8; color: #fff; }
 </style>
 </head><body>
 <div id="term"></div>
+<div id="keys"></div>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 <script>
@@ -65,6 +82,18 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
   term.loadAddon(fit);
   term.open(document.getElementById('term'));
   try { fit.fit(); } catch (_) { /* terminal may not yet be measurable */ }
+
+  // Keyboard input lands in xterm's hidden textarea — make sure the Android
+  // IME treats it as raw text: no autocorrect, no auto-capitalize, no
+  // suggestions. (xterm sets most of these; autocomplete/autocapitalize
+  // 'none' are belt-and-braces for Gboard.)
+  var helper = document.querySelector('.xterm-helper-textarea');
+  if (helper) {
+    helper.setAttribute('autocomplete', 'off');
+    helper.setAttribute('autocorrect', 'off');
+    helper.setAttribute('autocapitalize', 'none');
+    helper.setAttribute('spellcheck', 'false');
+  }
 
   // The shell lives on the daemon and survives disconnects. We reconnect on
   // drop (e.g. returning from the background) and re-attach to the same
@@ -138,8 +167,99 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
     };
   }
 
-  term.onData(function (data) {
+  // ── Termux-style extra keys ─────────────────────────────────────────
+  var ctrlOn = false, altOn = false, ctrlBtn = null, altBtn = null;
+
+  function wsSend(data) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+  }
+  // Arrows/HOME/END must switch between CSI and SS3 sequences when the
+  // running program (vim, less, htop) enables application cursor mode.
+  function appCursor() {
+    try { return !!(term.modes && term.modes.applicationCursorKeysMode); }
+    catch (_) { return false; }
+  }
+  function clearMods() {
+    ctrlOn = false; altOn = false;
+    if (ctrlBtn) ctrlBtn.classList.remove('on');
+    if (altBtn) altBtn.classList.remove('on');
+  }
+  function arrowSeq(letter) {
+    if (ctrlOn || altOn) {
+      // xterm modifyCursorKeys encoding: 1 + shift(1) + alt(2) + ctrl(4).
+      var mod = 1 + (altOn ? 2 : 0) + (ctrlOn ? 4 : 0);
+      clearMods();
+      return '\\x1b[1;' + mod + letter;
+    }
+    return (appCursor() ? '\\x1bO' : '\\x1b[') + letter;
+  }
+  // One-shot CTRL/ALT (Termux-style): tap CTRL then C → ^C; ALT prefixes ESC.
+  function applyMods(data) {
+    if ((!ctrlOn && !altOn) || data.length !== 1) return data;
+    var out = data;
+    if (ctrlOn) {
+      var c = data === ' ' ? 64 : data.toUpperCase().charCodeAt(0);
+      if (c >= 64 && c <= 95) out = String.fromCharCode(c & 31);
+    }
+    if (altOn) out = '\\x1b' + out;
+    clearMods();
+    return out;
+  }
+
+  var KEYS = [
+    [
+      { t: 'ESC',  f: function () { return '\\x1b'; } },
+      { t: '/',    f: function () { return '/'; } },
+      { t: '-',    f: function () { return '-'; } },
+      { t: 'HOME', f: function () { return appCursor() ? '\\x1bOH' : '\\x1b[H'; } },
+      { t: '\\u2191', f: function () { return arrowSeq('A'); } },
+      { t: 'END',  f: function () { return appCursor() ? '\\x1bOF' : '\\x1b[F'; } },
+      { t: 'PGUP', f: function () { return '\\x1b[5~'; } }
+    ],
+    [
+      { t: 'TAB',  f: function () { return '\\t'; } },
+      { t: 'CTRL', mod: 'ctrl' },
+      { t: 'ALT',  mod: 'alt' },
+      { t: '\\u2190', f: function () { return arrowSeq('D'); } },
+      { t: '\\u2193', f: function () { return arrowSeq('B'); } },
+      { t: '\\u2192', f: function () { return arrowSeq('C'); } },
+      { t: 'PGDN', f: function () { return '\\x1b[6~'; } }
+    ]
+  ];
+
+  (function buildKeys() {
+    var root = document.getElementById('keys');
+    KEYS.forEach(function (row) {
+      var rowEl = document.createElement('div');
+      rowEl.className = 'krow';
+      row.forEach(function (k) {
+        var b = document.createElement('div');
+        b.className = 'kbtn';
+        b.textContent = k.t;
+        if (k.mod === 'ctrl') ctrlBtn = b;
+        if (k.mod === 'alt') altBtn = b;
+        function press(e) {
+          // preventDefault keeps focus (and the soft keyboard) on the
+          // terminal textarea; on touch it also suppresses the emulated
+          // mousedown, so the two listeners never double-fire.
+          e.preventDefault();
+          if (k.mod) {
+            var on = k.mod === 'ctrl' ? (ctrlOn = !ctrlOn) : (altOn = !altOn);
+            b.classList.toggle('on', on);
+          } else {
+            wsSend(k.f());
+          }
+        }
+        b.addEventListener('touchstart', press, { passive: false });
+        b.addEventListener('mousedown', press);
+        rowEl.appendChild(b);
+      });
+      root.appendChild(rowEl);
+    });
+  })();
+
+  term.onData(function (data) {
+    wsSend(applyMods(data));
   });
   term.onResize(function (sz) {
     if (ws && ws.readyState === WebSocket.OPEN) {
