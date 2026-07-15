@@ -54,4 +54,12 @@ export type Screen =
   | { name: 'sessions'; machineId: string }
   | { name: 'toolPicker'; machineId: string }
   | { name: 'filePicker'; machineId: string; tool: string }
-  | { name: 'terminal'; machineId: string; sessionId?: string; cwd?: string; tool?: string };
+  | {
+      name: 'terminal';
+      machineId: string;
+      sessionId?: string;
+      cwd?: string;
+      tool?: string;
+      /** Install-and-set-up mode: the daemon installs `tool` before running it. */
+      install?: boolean;
+    };

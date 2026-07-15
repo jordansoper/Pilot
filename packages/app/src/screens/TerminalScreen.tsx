@@ -75,12 +75,17 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
   var retry = 0;
   var stopped = false; // true once the shell exits — no more reconnects
 
+  var INSTALL = "__INSTALL__"; // '1' → daemon installs the tool, then runs its setup
+
   function wsUrl() {
     var u = 'ws://' + HOST + ':' + PORT + '/ws/pty'
       + '?cwd=' + encodeURIComponent(CWD)
       + '&tool=__TOOL__'
       + '&cols=' + term.cols
       + '&rows=' + term.rows;
+    // Only meaningful when creating the session; re-attaches (which always
+    // carry a session id) ignore it server-side.
+    if (INSTALL === '1') u += '&install=1';
     if (currentSession) u += '&session=' + encodeURIComponent(currentSession);
     return u;
   }
@@ -162,6 +167,7 @@ function renderHtml(opts: {
   rows: number;
   session: string;
   tool: string;
+  install: boolean;
 }): string {
   return TERMINAL_HTML_TEMPLATE.replace(/__([A-Z]+)__/g, (_, key: string) => {
     switch (key) {
@@ -181,6 +187,8 @@ function renderHtml(opts: {
         return opts.session;
       case 'TOOL':
         return opts.tool;
+      case 'INSTALL':
+        return opts.install ? '1' : '';
       default:
         return '';
     }
@@ -198,6 +206,8 @@ export interface TerminalScreenProps {
   cwd?: string;
   /** Tool id (defaults to 'bash' if not provided). */
   tool?: string;
+  /** Install-and-set-up mode: the daemon installs `tool`, then runs it. */
+  install?: boolean;
   onBack: () => void;
 }
 
@@ -206,6 +216,7 @@ export function TerminalScreen({
   sessionId,
   cwd,
   tool = 'bash',
+  install = false,
   onBack,
 }: TerminalScreenProps) {
   const [machine, setMachine] = useState<PairedMachine | null>(null);
@@ -282,6 +293,7 @@ export function TerminalScreen({
     rows: 24,
     session: sessionId ?? '',
     tool,
+    install,
   });
 
   return (
@@ -302,7 +314,7 @@ export function TerminalScreen({
           // Stable within a mount so backgrounding doesn't reset the terminal;
           // keyed by the specific session/cwd so opening a different session
           // gets a fresh WebView.
-          key={`${machine.id}|${sessionId ?? `new:${cwd ?? ''}`}|${tool}|r${reconnectKey}`}
+          key={`${machine.id}|${sessionId ?? `new:${cwd ?? ''}`}|${tool}|${install ? 'i' : ''}|r${reconnectKey}`}
         />
       </View>
     </View>

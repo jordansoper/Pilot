@@ -87,6 +87,13 @@ export default function App() {
           onPick={(tool) =>
             push({ name: 'filePicker', machineId: current.machineId, tool })
           }
+          // Install & set up: no folder to pick — go straight to a terminal
+          // where the daemon runs the install, then the tool's first-run
+          // setup. `cwd` comes from the picker (the daemon's fsRoot, i.e.
+          // usually the home dir).
+          onInstall={(tool, cwd) =>
+            replace({ name: 'terminal', machineId: current.machineId, tool, cwd, install: true })
+          }
         />
       )}
       {current.name === 'filePicker' && (
@@ -104,6 +111,7 @@ export default function App() {
           sessionId={current.sessionId}
           cwd={current.cwd}
           tool={current.tool}
+          install={current.install}
           onBack={back}
         />
       )}

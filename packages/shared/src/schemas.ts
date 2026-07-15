@@ -82,6 +82,12 @@ export const ToolInfoSchema = z.object({
   label: z.string().min(1).max(100),
   /** Whether `which <bin>` succeeded for this tool on the host. */
   available: z.boolean(),
+  /**
+   * Whether the daemon can install this tool on the host (see the `install`
+   * flag on the PTY handshake). Optional for back-compat with older daemons
+   * that don't report it.
+   */
+  installable: z.boolean().optional(),
 });
 
 /** Response payload of `GET /api/tools`. */
@@ -178,6 +184,14 @@ export const PtyHelloQuerySchema = z.object({
     .regex(/^[a-z0-9-]+$/, 'tool id must match /^[a-z0-9-]+$/'),
   /** Optional model name (used by `ollama run <model>`). */
   model: z.string().min(1).max(100).optional(),
+  /**
+   * When `'1'`, spawn the tool's install-and-set-up script instead of the
+   * tool itself: the daemon runs the launcher's install command in the PTY
+   * and, on success, execs the tool so the user completes any first-run
+   * setup (login, config) interactively. Only honoured for launchers that
+   * advertise `installable` in `GET /api/tools`. Ignored on re-attach.
+   */
+  install: z.literal('1').optional(),
   /**
    * Existing session id to re-attach to (kept alive on the daemon across
    * disconnects). Omitted/unknown → a fresh session is created and its id is
