@@ -8,15 +8,33 @@
  * Requires bash on PATH (or process.env.SHELL resolving to a working shell).
  */
 import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import process from 'node:process';
 import WebSocket from 'ws';
-import { HealthResponseSchema, TOKEN_BYTES } from '@pilot/shared';
+import {
+  FS_ALLOWLIST_ROOT_ENV,
+  FsMkdirResponseSchema,
+  HealthResponseSchema,
+  TOKEN_BYTES,
+} from '@pilot/shared';
 import { startServer } from '../server.js';
 
 const MAX_LOGGED_CHUNKS = 20;
 const ACK_TIMEOUT_MS = 60_000;
 
 async function main(): Promise<void> {
+  // Boot the daemon with FS_ALLOWLIST_ROOT pinned to a fresh tmp dir BEFORE
+  // startServer (the daemon reads the env once at boot, not per-request).
+  // The mkdir tests then run against a private allowlist so they can't
+  // pollute the host's $HOME, and the escape test uses a sibling tmp dir,
+  // not a hardcoded system path.
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-smoke-root-'));
+  const tmpOutside = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-smoke-out-'));
+  const mkdirName = `pilot-${randomBytes(4).toString('hex')}`;
+  process.env[FS_ALLOWLIST_ROOT_ENV] = tmpRoot;
+
   const token = randomBytes(TOKEN_BYTES).toString('hex');
   const { port, close } = await startServer({
     token,
@@ -26,23 +44,75 @@ async function main(): Promise<void> {
   });
   console.log(`[smoke] listening on 127.0.0.1:${port}`);
 
-  // 1) /api/health with a valid token returns 200 + JSON.
-  const healthRes = await fetch(`http://127.0.0.1:${port}/api/health`, {
-    headers: { authorization: `Bearer ${token}` },
-  });
-  if (healthRes.status !== 200) {
-    throw new Error(`/api/health status=${healthRes.status}`);
-  }
-  const healthJson = HealthResponseSchema.parse(await healthRes.json());
-  console.log(`[smoke] /api/health OK:`, healthJson);
+  try {
+    // 1) /api/health with a valid token returns 200 + JSON.
+    const healthRes = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (healthRes.status !== 200) {
+      throw new Error(`/api/health status=${healthRes.status}`);
+    }
+    const healthJson = HealthResponseSchema.parse(await healthRes.json());
+    console.log(`[smoke] /api/health OK:`, healthJson);
 
-  // 2) /api/health without a token returns 401.
-  const unauthRes = await fetch(`http://127.0.0.1:${port}/api/health`);
-  if (unauthRes.status !== 401) {
-    throw new Error(`/api/health without auth: expected 401, got ${unauthRes.status}`);
-  }
+    // 2) /api/health without a token returns 401.
+    const unauthRes = await fetch(`http://127.0.0.1:${port}/api/health`);
+    if (unauthRes.status !== 401) {
+      throw new Error(`/api/health without auth: expected 401, got ${unauthRes.status}`);
+    }
 
-  // 3) WS round-trip on bash.
+    // 3) POST /api/fs/mkdir — happy path. Expect 201 and a JSON body of
+    // shape FsMkdirResponseSchema with the host-native absolute path of the
+    // new folder (server-joined, never client-built).
+    const mkdirRes = await fetch(`http://127.0.0.1:${port}/api/fs/mkdir`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ parent: tmpRoot, name: mkdirName }),
+    });
+    if (mkdirRes.status !== 201) {
+      throw new Error(`/api/fs/mkdir happy: expected 201, got ${mkdirRes.status}`);
+    }
+    const mkdirJson = FsMkdirResponseSchema.parse(await mkdirRes.json());
+    const expectedPath = path.join(tmpRoot, mkdirName);
+    if (mkdirJson.path !== expectedPath) {
+      throw new Error(
+        `/api/fs/mkdir happy: path mismatch (got ${mkdirJson.path}, expected ${expectedPath})`,
+      );
+    }
+
+    // 4) POST /api/fs/mkdir — duplicate name → 409 (the directory already
+    // exists on disk from step 3).
+    const dupRes = await fetch(`http://127.0.0.1:${port}/api/fs/mkdir`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ parent: tmpRoot, name: mkdirName }),
+    });
+    if (dupRes.status !== 409) {
+      throw new Error(`/api/fs/mkdir dup: expected 409, got ${dupRes.status}`);
+    }
+
+    // 5) POST /api/fs/mkdir — parent outside the FS allowlist → 400.
+    // `tmpOutside` is a real sibling dir that exists on disk, so a missing-
+    // path error wouldn't accidentally fake a "path outside allowlist".
+    const escapeRes = await fetch(`http://127.0.0.1:${port}/api/fs/mkdir`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ parent: tmpOutside, name: mkdirName }),
+    });
+    if (escapeRes.status !== 400) {
+      throw new Error(`/api/fs/mkdir escape: expected 400, got ${escapeRes.status}`);
+    }
+
+    // 6) WS round-trip on bash.
   const marker = `pilot-smoke-${randomBytes(4).toString('hex')}`;
   const ws = new WebSocket(
     `ws://127.0.0.1:${port}/ws/pty?cwd=${encodeURIComponent(
@@ -108,7 +178,7 @@ async function main(): Promise<void> {
     }
   }
 
-  // 4) Bad token on upgrade returns 401 (no protocol switch).
+  // 7) Bad token on upgrade returns 401 (no protocol switch).
   await new Promise<void>((resolve, reject) => {
     const sock = new WebSocket(
       `ws://127.0.0.1:${port}/ws/pty?cwd=${encodeURIComponent(process.cwd())}&tool=bash`,
@@ -143,8 +213,25 @@ async function main(): Promise<void> {
     });
   });
 
-  await close();
-  console.log(`[smoke] PASS — bash echoed "${marker}" and bad-auth was rejected`);
+    console.log(
+      `[smoke] PASS — mkdir 201/409/400 OK, bash echoed "${marker}", bad-auth ws rejected`,
+    );
+  } finally {
+    await close();
+    // Force-remove both tmp dirs so we don't leak `/tmp/pilot-smoke-*` on
+    // every CI run, regardless of pass/fail.
+    for (const d of [tmpRoot, tmpOutside]) {
+      try {
+        fs.rmSync(d, { recursive: true, force: true });
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+    // Hygiene: the daemon reads PILOT_FS_ROOT live, so unset it so a future
+    // boot in the same Node process (e.g. ad-hoc `tsx server.ts` smoke runs)
+    // gets the documented default instead of a leaked test dir.
+    delete process.env[FS_ALLOWLIST_ROOT_ENV];
+  }
 }
 
 main().catch((err) => {

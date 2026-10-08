@@ -5,6 +5,10 @@ node_modules/
 # Build outputs
 dist/
 build/
+# …but packages/desktop/build/ is electron-builder's buildResources dir — the
+# afterPack hook and the icon are source, not output. The blanket rule above
+# had been silently dropping them.
+!packages/desktop/build/
 *.tsbuildinfo
 .expo/
 .expo-shared/

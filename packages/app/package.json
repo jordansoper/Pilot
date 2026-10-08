@@ -13,18 +13,23 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "vendor:xterm": "node scripts/vendor-xterm.mjs",
     "prebuild:android": "expo prebuild --platform android --clean",
     "build:android:preview": "eas build --platform android --profile preview --non-interactive",
     "build:android:production": "eas build --platform android --profile production --non-interactive",
     "patch:android": "node ../../scripts/patch-android-prebuild.mjs",
-    "build:android:local:debug": "pnpm prebuild:android && pnpm patch:android && cd android && ./gradlew assembleDebug",
-    "build:android:local:release": "pnpm prebuild:android && pnpm patch:android && cd android && ./gradlew assembleRelease"
+    "gradle": "node scripts/gradle.mjs",
+    "build:android:local:debug": "pnpm prebuild:android && pnpm patch:android && node scripts/gradle.mjs assembleDebug",
+    "build:android:local:release": "pnpm prebuild:android && pnpm patch:android && node scripts/gradle.mjs assembleRelease"
   },
   "dependencies": {
     "@pilot/shared": "workspace:*",
     "@react-native-async-storage/async-storage": "1.23.1",
     "expo": "~51.0.0",
     "expo-camera": "~15.0.2",
+    "expo-clipboard": "~6.0.3",
+    "expo-constants": "~16.0.2",
+    "expo-notifications": "~0.28.19",
     "expo-status-bar": "~1.12.1",
     "react": "18.2.0",
     "react-native": "0.74.5",
@@ -33,6 +38,8 @@
   "devDependencies": {
     "@babel/core": "^7.24.0",
     "@types/react": "~18.2.79",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "typescript": "5.6.3",
     "vitest": "^2.1.3"
   }

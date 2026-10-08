@@ -42,9 +42,9 @@ export default [
     },
   },
 
-  // Repo tooling scripts (Node globals)
+  // Repo and per-package tooling scripts (Node globals)
   {
-    files: ['scripts/**/*.{js,mjs}'],
+    files: ['scripts/**/*.{js,mjs}', 'packages/*/scripts/**/*.{js,mjs}'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',

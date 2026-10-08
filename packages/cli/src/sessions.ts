@@ -2,14 +2,27 @@ import { randomUUID } from 'node:crypto';
 import type { IPty } from 'node-pty';
 import type { Launcher, LauncherContext } from './launchers.js';
 import type { PtyHelloQuery } from '@pilot/shared';
+import {
+  QUIET_MS,
+  newAttentionState,
+  shouldNotify,
+  summarizeTail,
+  type AttentionState,
+} from './attention.js';
 
 /** Max bytes of terminal output retained per session for scrollback replay. */
 const BUFFER_MAX_BYTES = 256 * 1024;
-/** Keep a detached (backgrounded) session this long before killing its PTY. */
-const IDLE_MAX_MS = 30 * 60 * 1000;
 /** Hard cap on concurrent sessions to bound resource use. */
-const MAX_SESSIONS = 24;
+const MAX_SESSIONS = 64;
 const REAP_INTERVAL_MS = 60 * 1000;
+
+/** One attached viewer of a session (an open WebSocket). */
+export interface SessionClient {
+  /** Deliver PTY output. */
+  send(data: string): void;
+  /** The PTY exited; deliver the exit notice and close. */
+  exit(e: { exitCode: number; signal: number | null }): void;
+}
 
 export interface PtySession {
   id: string;
@@ -24,13 +37,16 @@ export interface PtySession {
   createdMs: number;
   /** Bounded tail of PTY output, replayed when a client re-attaches. */
   buffer: string;
-  /** Current output sink (the attached WebSocket), or null when detached. */
-  sink: ((data: string) => void) | null;
-  /** Called once when the PTY exits (server forwards an exit control frame). */
-  onExit: ((e: { exitCode: number; signal: number | null }) => void) | null;
-  /** The socket currently attached (opaque); guards late-close detaches. */
-  owner: unknown;
+  /**
+   * Every client currently watching this session (phone, desktop app, …).
+   * All of them receive the same output and any of them may type, so a
+   * session can be followed live from several devices at once.
+   */
+  clients: Set<SessionClient>;
   attached: boolean;
+  /** Inputs to the "agent is waiting for you" heuristic. */
+  attention: AttentionState;
+  quietTimer: ReturnType<typeof setTimeout> | null;
   alive: boolean;
   lastDetachMs: number;
 }
@@ -45,7 +61,16 @@ export class SessionManager {
   private sessions = new Map<string, PtySession>();
   private reaper: ReturnType<typeof setInterval> | null = null;
 
-  constructor() {
+  /**
+   * @param onWaiting called when an agent session has gone quiet after output
+   *   and nobody is typing — the daemon turns this into a push notification.
+   */
+  constructor(
+    private readonly onWaiting?: (
+      session: PtySession,
+      summary: string,
+    ) => void,
+  ) {
     this.reaper = setInterval(() => this.reap(), REAP_INTERVAL_MS);
     this.reaper.unref?.();
   }
@@ -63,7 +88,11 @@ export class SessionManager {
       }
     }
     // Fresh session.
-    if (this.sessions.size >= MAX_SESSIONS) this.reap(true);
+    // Sessions live until the user closes them (or the shell exits), so a full
+    // table is an error rather than a cue to evict someone's detached session.
+    if (this.sessions.size >= MAX_SESSIONS) {
+      throw new Error(`session limit reached (${MAX_SESSIONS}); close one first`);
+    }
     const term = launcher.spawn(ctx, hello);
     const session: PtySession = {
       id: randomUUID(),
@@ -73,10 +102,10 @@ export class SessionManager {
       name: null,
       createdMs: Date.now(),
       buffer: '',
-      sink: null,
-      onExit: null,
-      owner: null,
-      attached: true,
+      clients: new Set(),
+      attached: false,
+      attention: newAttentionState(),
+      quietTimer: null,
       alive: true,
       lastDetachMs: 0,
     };
@@ -84,12 +113,13 @@ export class SessionManager {
     // forward to whoever is currently attached.
     term.onData((data: string) => {
       appendBounded(session, data);
-      session.sink?.(data);
+      for (const c of session.clients) c.send(data);
+      this.noteOutput(session, data.length);
     });
     term.onExit((e: { exitCode: number; signal?: number }) => {
       session.alive = false;
       const payload = { exitCode: e.exitCode, signal: e.signal ?? null };
-      session.onExit?.(payload);
+      for (const c of [...session.clients]) c.exit(payload);
       // Give a re-attach a brief window to see the exit, then drop it.
       setTimeout(() => this.remove(session.id), 5_000).unref?.();
     });
@@ -97,18 +127,45 @@ export class SessionManager {
     return { session, resumed: false };
   }
 
-  /** Mark a session detached (client gone); its PTY keeps running. */
-  detach(session: PtySession): void {
-    session.sink = null;
-    session.onExit = null;
-    session.owner = null;
-    session.attached = false;
-    session.lastDetachMs = Date.now();
+  /** PTY produced output: restart the "has it settled?" countdown. */
+  private noteOutput(session: PtySession, bytes: number): void {
+    if (!this.onWaiting) return;
+    session.attention.bytesSinceInput += bytes;
+    if (session.quietTimer) clearTimeout(session.quietTimer);
+    session.quietTimer = setTimeout(() => {
+      session.quietTimer = null;
+      if (!session.alive) return;
+      if (!shouldNotify(session.attention, session.tool, Date.now())) return;
+      session.attention.notified = true;
+      this.onWaiting?.(session, summarizeTail(session.buffer));
+    }, QUIET_MS);
+    session.quietTimer.unref?.();
+  }
+
+  /** A client typed into the session: the user is present, re-arm. */
+  noteInput(session: PtySession): void {
+    session.attention.lastInputMs = Date.now();
+    session.attention.bytesSinceInput = 0;
+    session.attention.notified = false;
+  }
+
+  /** Attach a viewer to a session. */
+  attach(session: PtySession, client: SessionClient): void {
+    session.clients.add(client);
+    session.attached = true;
+  }
+
+  /** Remove one viewer; the PTY keeps running even when none are left. */
+  detach(session: PtySession, client: SessionClient): void {
+    session.clients.delete(client);
+    session.attached = session.clients.size > 0;
+    if (!session.attached) session.lastDetachMs = Date.now();
   }
 
   remove(id: string): void {
     const s = this.sessions.get(id);
     if (!s) return;
+    if (s.quietTimer) clearTimeout(s.quietTimer);
     try {
       s.term.kill();
     } catch {
@@ -117,23 +174,26 @@ export class SessionManager {
     this.sessions.delete(id);
   }
 
-  /** Kill sessions whose PTY exited or that have been idle too long. */
-  private reap(force = false): void {
-    const now = Date.now();
+  /**
+   * Drop sessions whose PTY exited. Detached sessions are deliberately never
+   * reaped for idleness: they live until closed from the app.
+   */
+  private reap(): void {
     for (const [id, s] of this.sessions) {
-      const idle = !s.attached && now - s.lastDetachMs > IDLE_MAX_MS;
-      if (!s.alive || idle) {
-        this.remove(id);
-      }
+      if (!s.alive) this.remove(id);
     }
-    // Under pressure, drop the oldest detached session to make room.
-    if (force && this.sessions.size >= MAX_SESSIONS) {
-      let oldest: PtySession | null = null;
-      for (const s of this.sessions.values()) {
-        if (!s.attached && (!oldest || s.lastDetachMs < oldest.lastDetachMs)) oldest = s;
-      }
-      if (oldest) this.remove(oldest.id);
-    }
+  }
+
+  /**
+   * A still-running session by id, or undefined if unknown or already exited.
+   *
+   * Used by the WS handshake to tell a re-attach from a fresh start before the
+   * upgrade, so a resume doesn't have to satisfy checks that only make sense
+   * for a new PTY (notably a valid `cwd` — the running one already has one).
+   */
+  getLive(id: string): PtySession | undefined {
+    const s = this.sessions.get(id);
+    return s && s.alive ? s : undefined;
   }
 
   /** Rename a live session. Returns false when the id is unknown. */

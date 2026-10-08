@@ -12,14 +12,18 @@
       "adaptiveIcon": {
         "backgroundColor": "#ffffff"
       },
-      "permissions": ["android.permission.CAMERA"],
+      "permissions": ["android.permission.CAMERA", "android.permission.POST_NOTIFICATIONS"],
       "usesCleartextTraffic": true
     },
     "ios": {
       "bundleIdentifier": "com.pilot.app",
       "supportsTablet": true
     },
+    "extra": {
+      "eas": { "projectId": "" }
+    },
     "plugins": [
+      "expo-notifications",
       [
         "expo-camera",
         {

@@ -21,7 +21,13 @@ describe('loadOrCreateToken', () => {
     expect(first.created).toBe(true);
     expect(first.token).toMatch(/^[0-9a-f]{64}$/);
     expect(first.path).toBe(tokenPath);
-    expect(statSync(tokenPath).mode & 0o077).toBe(0); // no group/other bits
+    // POSIX only: Windows has no group/other mode bits — chmod there just
+    // toggles the read-only flag and stat always reports 0o666, so this
+    // assertion would fail on a mode the platform can't actually express.
+    // token.ts treats the chmod as best-effort for the same reason.
+    if (process.platform !== 'win32') {
+      expect(statSync(tokenPath).mode & 0o077).toBe(0); // no group/other bits
+    }
     expect(readFileSync(tokenPath, 'utf8').trim()).toBe(first.token);
   });
 

@@ -4,6 +4,8 @@ import type {
   FsEntrySchema,
   FsSegmentSchema,
   FsResponseSchema,
+  FsMkdirRequestSchema,
+  FsMkdirResponseSchema,
   ToolInfoSchema,
   ToolsResponseSchema,
   HealthResponseSchema,
@@ -16,6 +18,8 @@ export type PairingPayload = z.infer<typeof PairingPayloadSchema>;
 export type FsEntry = z.infer<typeof FsEntrySchema>;
 export type FsSegment = z.infer<typeof FsSegmentSchema>;
 export type FsResponse = z.infer<typeof FsResponseSchema>;
+export type FsMkdirRequest = z.infer<typeof FsMkdirRequestSchema>;
+export type FsMkdirResponse = z.infer<typeof FsMkdirResponseSchema>;
 export type ToolInfo = z.infer<typeof ToolInfoSchema>;
 export type ToolsResponse = z.infer<typeof ToolsResponseSchema>;
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;

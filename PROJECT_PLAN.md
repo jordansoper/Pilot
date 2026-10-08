@@ -27,7 +27,7 @@ launches `bash`; the AI-tool launchers are the next step (§7).
 | Transport | **Tailscale + LAN**, no central server | Everything runs inside the user's own network. One pairing QR carries both the Tailscale IP and the LAN IP; the app uses whichever answers. |
 | CLI runtime | **Node ≥ 20 + TypeScript** | Runs via `tsx` in dev, `node dist` in prod. (Bun was the original plan; Node won for `node-pty` stability.) |
 | Android app | **React Native + Expo** (Android-first) | UI is lists/pickers + xterm.js in a `react-native-webview`. |
-| Desktop app | **Electron** (`packages/desktop`) | Wraps the daemon in a window; scaffolded, not yet self-contained. §7 Phase D. |
+| Desktop app | **Electron** (`packages/desktop`) | Self-contained (forks the daemon, tray, run-at-login, tabbed UI); a Windows NSIS installer builds. Unsigned; macOS/Linux packaging unverified. §7 Phase D. |
 | Terminal UI | **xterm.js in a WebView over WebSocket** | TUIs (Claude Code, etc.) are streamed faithfully as ANSI, not parsed into chat bubbles. |
 | Sessions | **Persistent, server-side** | The PTY survives disconnects; the app re-attaches by id and replays scrollback. |
 
@@ -76,8 +76,11 @@ except the loopback pairing page. Schemas live in `@pilot/shared`.
 | `GET /api/health` | ✅ | `{ version, uptimeMs, tailscaleIp, port }` — drives the online dot. |
 | `GET /api/sessions` | ✅ | `{ sessions: [{ id, cwd, tool, createdMs, attached }] }` — the session picker. |
 | `GET /api/fs?path=` | ✅ | `{ path, entries: [{ name, type }] }`. Allowlist rooted at `$HOME` (or `PILOT_FS_ROOT`); path-escape → 400. |
+| `POST /api/fs/mkdir` | ✅ | Body `{ parent, name }` (`FsMkdirRequestSchema`). Returns `201 { path }` on success, `409` if it already exists, `400` on validation / allowlist escape, `403` on `EACCES`/`EPERM`. Drives the "+ New folder" button in the phone's folder picker. |
 | `WS /ws/pty?cwd&tool&cols&rows[&session]` | ✅ | Bidirectional PTY. `session=<uuid>` re-attaches to a live session; otherwise a new one is created and its id is returned. Session/exit are **binary** control frames; PTY bytes are text. |
-| `GET /api/tools` | ⛔ **not built** | Will report which launchers are installed. Blocks the tool picker (§7 Phase A). |
+| `GET /api/tools` | ✅ | `{ tools: [{ id, label, available }] }` — PATH scan (PATHEXT-aware on Windows). Unavailable tools are listed, not hidden. |
+| `PATCH /api/sessions/:id` | ✅ | Rename a session. |
+| `DELETE /api/sessions/:id` | ✅ | Kill/close a session. |
 
 ## 6. Pairing, sessions & security
 
@@ -116,20 +119,28 @@ Status legend: ✅ done · 🟡 partial · ⛔ not started.
 - ✅ **Folder picker** — browse the machine's dirs (`$HOME` allowlist) to choose where a new session launches.
 - ✅ **Settings + Reset app**, back navigation (incl. Android hardware back), status-bar layout fix.
 
-### Phase A — AI tool launchers (highest priority; delivers the original goal)
+### Phase A — AI tool launchers (daemon done; app UI missing)
 
-Right now only `bash` is registered. This is the step that makes Pilot *Pilot*.
+- ✅ `cli`: `bash`/`claude`/`ollama`/`freebuff` launchers with PATH detection; `GET /api/tools`.
+- ✅ `app`: **tool picker** (`ToolPickerScreen`) after the folder picker, with a model input for `ollama`; tool/model flow through to `/ws/pty`. Needs on-device verification.
+- ⛔ Verify Claude Code's interactive first-run auth completes inside the PTY.
 
-- `cli`: register `claude`, `freebuff`, `ollama` launchers (each = binary + args + a `which`-style detection); implement `GET /api/tools`.
-- `app`: a **tool picker** in the new-session flow (after the folder picker). `ollama` also needs a model input.
-- Verify Claude Code's interactive first-run auth completes inside the PTY.
+### Phase B — Terminal UX polish (**current focus**)
 
-### Phase B — Terminal UX polish
+- ✅ Quick-key bar: Esc/Tab/arrows/^C/^D/Home/End/PgUp/PgDn plus sticky Ctrl/Alt (DECCKM-aware).
+- ✅ xterm.js bundled into the app (`src/vendor`, `scripts/vendor-xterm.mjs`) — no CDN, works offline.
+- ✅ Rename/kill a session (daemon `PATCH`/`DELETE`; confirm the app UI exposes both).
+- 🟡 Copy/paste: long-press selects a line (drag extends), Copy/Paste keys in the bar via `expo-clipboard` (**run `pnpm install`, rebuild the APK**). Not yet verified on device.
+- ⛔ IME / keyboard-height handling, font-size / pinch-zoom.
+- ✅ Sessions persist until closed from the app (idle reaping removed; cap 64, then new sessions are refused).
+- ✅ Multi-attach: phone and desktop can follow the same session live (daemon mirrors output to all clients). Desktop UI needs a check that it re-attaches by id.
+- ⛔ Real-device pass on the key bar and the Windows resume fix.
 
-- A **Ctrl / Alt / Esc / arrows** key toolbar above the terminal (these are painful on a phone keyboard).
-- Copy/paste, and IME/height handling.
-- **Bundle xterm.js** instead of loading it from a CDN, so the terminal works with no internet (pure tailnet/LAN).
-- Session niceties: kill/rename a session from the app; configurable idle timeout.
+### Phase B2 — Newly requested (in progress)
+
+- 🟡 **Push notifications** when an agent is waiting for input. Built: daemon heuristic (`attention.ts`: output burst → 6 s silence, user not typing, non-shell tools only), `PushRegistry` (`~/.pilot/push-tokens.json`, sends via Expo's push service, prunes dead tokens), `POST /api/push/register|unregister`, app registration on launch + Settings toggle. **Still needed to work on a real phone:** an EAS project id in `app.json` (`extra.eas.projectId`), FCM credentials (`google-services.json` / `eas credentials`), `pnpm install`, APK rebuild. Not yet done: tap-to-open the session, tuning the heuristic against real Claude Code/ollama output.
+- ⛔ **Linux CLI / host app updates** — research install + self-update story; fix reported `mkdir` failure on Linux (not reproduced; need the error text).
+- ⛔ **Windows: can't start a session from the phone** — daemon-side start verified working locally (smoke passes); investigate app/installer version mismatch.
 
 ### Phase C — CLI daemonization (headless)
 
@@ -141,16 +152,20 @@ Right now only `bash` is registered. This is the step that makes Pilot *Pilot*.
 Make `packages/desktop` a real, **self-contained** app so a non-technical user
 never touches a terminal.
 
-- **Today:** an Electron scaffold that spawns the daemon as a child process and shows the loopback pairing page in a window. Needs a Mac with a display to launch (the scaffold uses the system `node`).
-- **To finish:** bundle its own Node runtime + `node-pty` (electron-rebuild) so no system Node is needed; tray / menu-bar lifecycle with run-at-login; a settings panel (port, name, **bind-to-Tailscale-IP by default**); a folder-access GUI for the FS allowlist; tool toggles; then **code-signing + notarization** and a single installer per OS (`.dmg`/`.pkg`, `.exe`/MSI, AppImage/`.deb`).
+- **Today:** self-contained Electron app — forks the daemon, tray, run-at-login, tabbed UI, native-dep handling (`scripts/ensure-native-deps.cjs`, `build/after-pack.cjs`). A Windows installer (`Pilot Setup 0.1.0.exe`) builds.
+- **To finish:** settings panel (port, name, **bind-to-Tailscale-IP by default**); folder-access GUI for the FS allowlist; tool toggles; verify macOS/Linux builds; **code-signing + notarization** and installers per OS (`.dmg`, MSI/`.exe`, AppImage/`.deb`).
 - **Watch out for:** the `node-pty` ABI under Electron, and port-7117 conflicts with a manually-run daemon (detect, don't crash on `EADDRINUSE`).
 - **Done =** on a clean machine with no Node/pnpm/repo, install the signed app, launch it, toggle run-at-login, open the QR, add an allowed folder, and pair + drive a session from the phone — Tailscale the only other thing installed.
 
 ### Later / bigger picture
 
-- **iOS app** — the codebase is Expo, so mostly a build target + UI testing away.
-- **Tighter security** — network-security-config scoped to tailnet + LAN instead of blanket cleartext; an in-app "rotate token" button.
-- **Transport fallback** — if Tailscale-as-a-prerequisite ever blocks adoption, add a relay + WebRTC path. The REST/WS contract is transport-agnostic, so this is localized.
+- **iOS app** — dropped from scope for now (Android-only for the first release).
+- **Tighter security** *(wanted — required for public release)* — network-security-config scoped to tailnet + LAN instead of blanket cleartext; an in-app "rotate token" button.
+- **Transport fallback** *(wanted)* — if Tailscale-as-a-prerequisite ever blocks adoption, add a relay + WebRTC path. The REST/WS contract is transport-agnostic, so this is localized.
+
+### Release readiness (public GitHub release)
+
+Pilot will be published on GitHub when complete. Before that: finish Phases A and B; harden security (above); commit the large uncommitted working tree in logical chunks; signed/tagged release artifacts (APK + desktop installers) with checksums; README with install and pairing walkthrough, LICENSE, SECURITY.md; CI building both apps; a clean-machine acceptance run per §9.
 
 ## 8. Known constraints & gotchas
 

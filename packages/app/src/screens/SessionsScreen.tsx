@@ -10,15 +10,19 @@ import {
 import type { SessionInfo, SessionsResponse } from '@pilot/shared';
 import { SESSIONS_PATH } from '@pilot/shared';
 import { TopBar } from '../components/TopBar.js';
-import { apiGet } from '../api.js';
+import { apiGet, describeApiError } from '../api.js';
 import { listMachines } from '../storage.js';
 import type { PairedMachine } from '../types.js';
 
 export interface SessionsScreenProps {
   machineId: string;
   onBack: () => void;
-  /** Attach to an existing session. */
-  onOpenSession: (sessionId: string) => void;
+  /**
+   * Attach to an existing session. The session's own `cwd` is passed along so
+   * a resume whose session has since exited can still start a replacement in
+   * the right folder — without it the terminal had to invent a default.
+   */
+  onOpenSession: (sessionId: string, cwd: string) => void;
   /** Start a new session (goes to the folder picker first). */
   onNewSession: () => void;
 }
@@ -52,8 +56,8 @@ export function SessionsScreen({
     try {
       const res = await apiGet<SessionsResponse>(m, SESSIONS_PATH);
       setSessions(res.sessions);
-    } catch {
-      setError('Could not reach the machine. Is it online?');
+    } catch (err) {
+      setError(describeApiError(err, 'the session list'));
       setSessions([]);
     }
   }, [machineId]);
@@ -85,7 +89,7 @@ export function SessionsScreen({
                 <TouchableOpacity
                   key={s.id}
                   style={styles.row}
-                  onPress={() => onOpenSession(s.id)}
+                  onPress={() => onOpenSession(s.id, s.cwd)}
                 >
                   <View
                     style={[styles.dot, s.attached ? styles.dotOn : styles.dotIdle]}

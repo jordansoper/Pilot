@@ -1,0 +1,11 @@
+# Generated and vendored files — not ours to format.
+# packages/app/src/vendor/xterm-assets.ts holds ~290 KB of minified upstream
+# xterm.js as string literals; running Prettier over it is pointless and slow.
+**/vendor/**
+**/dist/**
+**/build/**
+**/node_modules/**
+**/.expo/**
+packages/app/android/
+packages/app/ios/
+pnpm-lock.yaml

@@ -3,6 +3,8 @@ import {
   PairingPayloadSchema,
   FsEntrySchema,
   FsResponseSchema,
+  FsMkdirRequestSchema,
+  FsMkdirResponseSchema,
   ToolInfoSchema,
   ToolsResponseSchema,
   HealthResponseSchema,
@@ -102,7 +104,11 @@ describe('PairingPayloadSchema', () => {
 
 describe('FsEntrySchema / FsResponseSchema', () => {
   it('accepts a dir entry without size/mtime', () => {
-    const e = FsEntrySchema.parse({ name: '.git', type: 'dir', path: '/home/jordan/.git' });
+    const e = FsEntrySchema.parse({
+      name: '.git',
+      type: 'dir',
+      path: '/home/jordan/.git',
+    });
     expect(e.size).toBeUndefined();
   });
 
@@ -169,6 +175,103 @@ describe('FsEntrySchema / FsResponseSchema', () => {
   });
 });
 
+describe('FsMkdirRequestSchema', () => {
+  it('accepts a plain POSIX request', () => {
+    const r = FsMkdirRequestSchema.parse({
+      parent: '/home/jordan/projects',
+      name: 'new-app',
+    });
+    expect(r.name).toBe('new-app');
+  });
+
+  it('accepts a folder name with a leading dot (e.g. .vscode)', () => {
+    const r = FsMkdirRequestSchema.parse({
+      parent: '/home/jordan/code',
+      name: '.vscode',
+    });
+    expect(r.name).toBe('.vscode');
+  });
+
+  it('accepts a Windows-style parent path', () => {
+    const r = FsMkdirRequestSchema.parse({
+      parent: 'C:\\Users\\jordan\\code',
+      name: 'app',
+    });
+    expect(r.parent).toBe('C:\\Users\\jordan\\code');
+  });
+
+  it.each(['.', '..'])('rejects name = "%s"', (name) => {
+    expect(() => FsMkdirRequestSchema.parse({ parent: '/home/jordan', name })).toThrow();
+  });
+
+  it.each(['a/b', 'with/slash', 'a\\b', 'back\\slash'])(
+    'rejects name containing a path separator (%s)',
+    (name) => {
+      expect(() => FsMkdirRequestSchema.parse({ parent: '/home/jordan', name })).toThrow(
+        /separator/i,
+      );
+    },
+  );
+
+  it('rejects a 201-char name', () => {
+    expect(() =>
+      FsMkdirRequestSchema.parse({ parent: '/home/jordan', name: 'a'.repeat(201) }),
+    ).toThrow();
+  });
+
+  it('accepts a 200-char name at the boundary', () => {
+    const r = FsMkdirRequestSchema.parse({
+      parent: '/home/jordan',
+      name: 'a'.repeat(200),
+    });
+    expect(r.name).toHaveLength(200);
+  });
+
+  it.each(['-foo', '--all', '-rf'])('rejects a name starting with "-" (%s)', (name) => {
+    expect(() => FsMkdirRequestSchema.parse({ parent: '/home/jordan', name })).toThrow();
+  });
+
+  it.each(['foo ', 'foo.', 'foo .'])(
+    'rejects a name ending in space or "." (%s)',
+    (name) => {
+      expect(() =>
+        FsMkdirRequestSchema.parse({ parent: '/home/jordan', name }),
+      ).toThrow();
+    },
+  );
+
+  it('rejects a NUL byte', () => {
+    expect(() =>
+      FsMkdirRequestSchema.parse({ parent: '/home/jordan', name: 'foo\0bar' }),
+    ).toThrow(/NUL/i);
+  });
+
+  it.each(['CON', 'PRN', 'AUX', 'NUL', 'COM1', 'LPT9', 'con', 'lpt3'])(
+    'rejects Windows reserved names (case-insensitive: %s)',
+    (name) => {
+      expect(() => FsMkdirRequestSchema.parse({ parent: '/home/jordan', name })).toThrow(
+        /reserved/i,
+      );
+    },
+  );
+});
+
+describe('FsMkdirResponseSchema', () => {
+  it('accepts a POSIX response', () => {
+    const r = FsMkdirResponseSchema.parse({ path: '/home/jordan/projects/new-app' });
+    expect(r.path).toBe('/home/jordan/projects/new-app');
+  });
+
+  it('accepts a Windows response', () => {
+    const r = FsMkdirResponseSchema.parse({ path: 'C:\\Users\\jordan\\code\\app' });
+    expect(r.path).toBe('C:\\Users\\jordan\\code\\app');
+  });
+
+  it('rejects an empty path', () => {
+    expect(() => FsMkdirResponseSchema.parse({ path: '' })).toThrow();
+  });
+});
+
 describe('ToolsResponseSchema / ToolInfoSchema', () => {
   it('accepts an available tool', () => {
     const t = ToolInfoSchema.parse({
@@ -222,5 +325,18 @@ describe('PtyHelloQuerySchema', () => {
       model: 'llama3.2',
     });
     expect(q.model).toBe('llama3.2');
+  });
+
+  it('accepts a handshake with no cwd at all', () => {
+    // Resuming a session sends no cwd — the running PTY already has one, and
+    // only the daemon knows a valid path for its own OS. Requiring it here is
+    // what made the app send `/tmp`, which fails on Windows.
+    const q = PtyHelloQuerySchema.parse({ tool: 'bash', session: undefined });
+    expect(q.cwd).toBeUndefined();
+    expect(q.tool).toBe('bash');
+  });
+
+  it('still rejects an empty cwd, so a blank one is a bug not a default', () => {
+    expect(() => PtyHelloQuerySchema.parse({ cwd: '', tool: 'bash' })).toThrow();
   });
 });

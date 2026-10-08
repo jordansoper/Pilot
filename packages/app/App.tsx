@@ -12,8 +12,11 @@ import { MachinesScreen } from './src/screens/MachinesScreen.js';
 import { AddMachineScreen } from './src/screens/AddMachineScreen.js';
 import { SettingsScreen } from './src/screens/SettingsScreen.js';
 import { SessionsScreen } from './src/screens/SessionsScreen.js';
+import { ToolPickerScreen } from './src/screens/ToolPickerScreen.js';
 import { FilePickerScreen } from './src/screens/FilePickerScreen.js';
 import { TerminalScreen } from './src/screens/TerminalScreen.js';
+
+import { syncPushRegistrations } from './src/notifications.js';
 
 const HOME: Screen = { name: 'machines' };
 
@@ -34,12 +37,12 @@ export default function App() {
   const back = useCallback(() => {
     setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
   }, []);
-  // Replace the top screen (e.g. folder picker → terminal), so Back skips it.
-  const replace = useCallback(
-    (screen: Screen) => setStack((s) => [...s.slice(0, -1), screen]),
-    [],
-  );
   const goHome = useCallback(() => setStack([HOME]), []);
+
+  // Re-announce this phone to every paired machine on launch (idempotent).
+  useEffect(() => {
+    void syncPushRegistrations();
+  }, []);
 
   // Android hardware back: pop the stack; only let the OS exit from home.
   useEffect(() => {
@@ -73,8 +76,8 @@ export default function App() {
         <SessionsScreen
           machineId={current.machineId}
           onBack={back}
-          onOpenSession={(sessionId) =>
-            push({ name: 'terminal', machineId: current.machineId, sessionId })
+          onOpenSession={(sessionId, cwd) =>
+            push({ name: 'terminal', machineId: current.machineId, sessionId, cwd })
           }
           onNewSession={() => push({ name: 'filePicker', machineId: current.machineId })}
         />
@@ -83,8 +86,27 @@ export default function App() {
         <FilePickerScreen
           machineId={current.machineId}
           onBack={back}
-          onPick={(cwd) =>
-            replace({ name: 'terminal', machineId: current.machineId, cwd })
+          onPick={(cwd) => push({ name: 'toolPicker', machineId: current.machineId, cwd })}
+        />
+      )}
+      {current.name === 'toolPicker' && (
+        <ToolPickerScreen
+          machineId={current.machineId}
+          cwd={current.cwd}
+          onBack={back}
+          onPick={(tool, model) =>
+            // Drop both pickers so Back from the terminal lands on the
+            // sessions list.
+            setStack((s) => [
+              ...s.slice(0, -2),
+              {
+                name: 'terminal',
+                machineId: current.machineId,
+                cwd: current.cwd,
+                tool,
+                ...(model ? { model } : {}),
+              },
+            ])
           }
         />
       )}
@@ -93,6 +115,8 @@ export default function App() {
           machineId={current.machineId}
           sessionId={current.sessionId}
           cwd={current.cwd}
+          tool={current.tool}
+          model={current.model}
           onBack={back}
         />
       )}

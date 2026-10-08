@@ -6,10 +6,12 @@
   "main": "main.cjs",
   "scripts": {
     "start": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && electron .",
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "node scripts/ensure-native-deps.cjs",
     "rebuild": "pnpm exec @electron/rebuild",
     "package": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && pnpm exec electron-builder --mac",
     "package:dir": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && pnpm exec electron-builder --mac --dir",
+    "package:win": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && pnpm exec electron-builder --win",
+    "package:win:dir": "pnpm --filter @pilot/shared build && pnpm --filter @pilot/cli build && pnpm exec electron-builder --win --dir",
     "clean": "rm -rf dist *.tsbuildinfo"
   },
   "dependencies": {

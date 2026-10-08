@@ -1,6 +1,10 @@
 import process from 'node:process';
+import { accessSync, constants, statSync } from 'node:fs';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { spawn as ptySpawn, type IPty } from 'node-pty';
-import type { PtyHelloQuery } from '@pilot/shared';
+import type { PtyHelloQuery, ToolInfo } from '@pilot/shared';
+
+const isWindows = process.platform === 'win32';
 
 /** Per-spawn context derived from the WS handshake. */
 export interface LauncherContext {
@@ -12,19 +16,98 @@ export interface LauncherContext {
 }
 
 /**
- * A registered tool launcher. Phase 1 registers only `bash`. Phase 2 will
- * register `ollama-run` (uses `hello.model`) and `freebuff`.
+ * A registered tool launcher.
  *
- * Each launcher receives the full {@link PtyHelloQuery} so it can pick out
- * any field it needs (today: cwd/cols/rows; tomorrow: model, env vars).
+ * Each launcher receives the full {@link PtyHelloQuery} so it can pick out any
+ * field it needs (cwd/cols/rows for everyone; `model` for ollama).
  */
 export interface Launcher {
   /** Stable, URL-safe id matching `/^[a-z0-9-]+$/`. */
   id: string;
   /** Human label for the app UI. */
   label: string;
+  /** Executable looked up on PATH to decide whether the tool is installed. */
+  bin: string;
+  /**
+   * Set for the daemon's own shell, which is always spawnable and shouldn't be
+   * hidden just because `$SHELL` points somewhere a PATH scan won't find.
+   */
+  alwaysAvailable?: boolean;
   /** Spawn a PTY process for this tool. */
   spawn(ctx: LauncherContext, hello: PtyHelloQuery): IPty;
+}
+
+function isExecutableFile(p: string): boolean {
+  try {
+    if (!statSync(p).isFile()) return false;
+    // Windows has no execute bit; PATHEXT membership is the real test there.
+    if (!isWindows) accessSync(p, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve an executable the way a shell would, returning its full path or null.
+ *
+ * Deliberately not a `which`/`where` subprocess: this runs for every tool on
+ * every `GET /api/tools`, and spawning one process per probe is both slower and
+ * unusable from a synchronous caller. Honours `PATHEXT` on Windows, which
+ * matters because npm-installed CLIs land as `claude.cmd`, never a bare `.exe`.
+ */
+export function resolveOnPath(bin: string): string | null {
+  const exts = isWindows
+    ? (process.env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+    : [''];
+
+  // An explicit path isn't a PATH lookup — check it where it points.
+  if (isAbsolute(bin) || bin.includes('/') || (isWindows && bin.includes('\\'))) {
+    if (isExecutableFile(bin)) return bin;
+    for (const ext of exts) {
+      if (ext && isExecutableFile(bin + ext)) return bin + ext;
+    }
+    return null;
+  }
+
+  for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const full = join(dir, bin + ext);
+      if (isExecutableFile(full)) return full;
+    }
+  }
+  return null;
+}
+
+/**
+ * Spawn a PATH-resolved tool, failing with a message the app can show.
+ *
+ * Spawns the resolved path directly, including Windows `.cmd`/`.bat` shims —
+ * node-pty handles those itself (verified against a synthetic shim), so
+ * wrapping them in `cmd.exe /c` would only add a process layer that swallows
+ * exit codes and complicates Ctrl-C.
+ */
+function spawnTool(
+  bin: string,
+  args: readonly string[],
+  ctx: LauncherContext,
+  label: string,
+): IPty {
+  const resolved = resolveOnPath(bin);
+  if (!resolved) {
+    throw new Error(
+      `${label} is not installed on this machine (\`${bin}\` not found on PATH)`,
+    );
+  }
+
+  return ptySpawn(resolved, [...args], {
+    name: 'xterm-256color',
+    cols: ctx.cols,
+    rows: ctx.rows,
+    cwd: ctx.cwd,
+    env: ctx.env ?? process.env,
+  });
 }
 
 /**
@@ -36,20 +119,18 @@ export interface Launcher {
  *     `.profile` are sourced and user tooling (bun, ollama, nvm shims, etc.)
  *     ends up on PATH.
  *   • Windows: PowerShell (node-pty uses ConPTY; no `-l` — that flag doesn't
- *     exist there). Falls back to `%COMSPEC%` (cmd.exe) if ever needed.
+ *     exist there).
  */
-const isWindows = process.platform === 'win32';
+// Bracket access because noPropertyAccessFromIndexSignature is on.
+const shellBin = isWindows ? 'powershell.exe' : (process.env['SHELL'] ?? 'bash');
 
-const bashLauncher: Launcher = {
+const shellLauncher: Launcher = {
   id: 'bash',
   label: isWindows ? 'PowerShell' : 'Bash',
+  bin: shellBin,
+  alwaysAvailable: true,
   spawn(ctx, _hello) {
-    // Bracket access because noPropertyAccessFromIndexSignature is on.
-    const bin = isWindows
-      ? 'powershell.exe'
-      : (process.env['SHELL'] ?? 'bash');
-    const args = isWindows ? ['-NoLogo'] : ['-l'];
-    return ptySpawn(bin, args, {
+    return ptySpawn(shellBin, isWindows ? ['-NoLogo'] : ['-l'], {
       name: 'xterm-256color',
       cols: ctx.cols,
       rows: ctx.rows,
@@ -59,9 +140,39 @@ const bashLauncher: Launcher = {
   },
 };
 
-const launchers: ReadonlyMap<string, Launcher> = new Map([
-  [bashLauncher.id, bashLauncher],
-]);
+const claudeLauncher: Launcher = {
+  id: 'claude',
+  label: 'Claude Code',
+  bin: 'claude',
+  spawn(ctx) {
+    return spawnTool('claude', [], ctx, 'Claude Code');
+  },
+};
+
+const ollamaLauncher: Launcher = {
+  id: 'ollama',
+  label: 'Ollama',
+  bin: 'ollama',
+  spawn(ctx, hello) {
+    // `?model=` comes from the app's model picker. Without one, drop the user
+    // at ollama's own output rather than guessing which model they meant.
+    const args = hello.model ? ['run', hello.model] : [];
+    return spawnTool('ollama', args, ctx, 'Ollama');
+  },
+};
+
+const freebuffLauncher: Launcher = {
+  id: 'freebuff',
+  label: 'Freebuff',
+  bin: 'freebuff',
+  spawn(ctx) {
+    return spawnTool('freebuff', [], ctx, 'Freebuff');
+  },
+};
+
+const launchers: ReadonlyMap<string, Launcher> = new Map(
+  [shellLauncher, claudeLauncher, ollamaLauncher, freebuffLauncher].map((l) => [l.id, l]),
+);
 
 export function getLauncher(id: string): Launcher | undefined {
   return launchers.get(id);
@@ -69,4 +180,17 @@ export function getLauncher(id: string): Launcher | undefined {
 
 export function listLaunchers(): readonly Launcher[] {
   return Array.from(launchers.values());
+}
+
+/**
+ * Registered tools plus whether each is actually installed here — the body of
+ * `GET /api/tools`. Unavailable tools are still listed so the app can show them
+ * greyed out rather than pretending they don't exist.
+ */
+export function listTools(): ToolInfo[] {
+  return listLaunchers().map((l) => ({
+    id: l.id,
+    label: l.label,
+    available: l.alwaysAvailable === true || resolveOnPath(l.bin) !== null,
+  }));
 }

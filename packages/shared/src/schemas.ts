@@ -71,6 +71,83 @@ export const FsResponseSchema = z.object({
   entries: z.array(FsEntrySchema),
 });
 
+/**
+ * Windows reserved device names (case-insensitive). Rejected at the schema
+ * layer so a folder created on macOS/Linux doesn't silently break when the
+ * same daemon is later paired to a Windows client — `fs.mkdir` already
+ * refuses these on Windows, but the schema gives a friendly 400 instead of
+ * an opaque OS-level error.
+ */
+const WINDOWS_RESERVED_NAMES = new Set([
+  'CON',
+  'PRN',
+  'AUX',
+  'NUL',
+  'COM1',
+  'COM2',
+  'COM3',
+  'COM4',
+  'COM5',
+  'COM6',
+  'COM7',
+  'COM8',
+  'COM9',
+  'LPT1',
+  'LPT2',
+  'LPT3',
+  'LPT4',
+  'LPT5',
+  'LPT6',
+  'LPT7',
+  'LPT8',
+  'LPT9',
+]);
+
+/**
+ * Request body of `POST /api/fs/mkdir`. The server resolves and joins
+ * paths itself — the client never builds paths, since separators differ
+ * per host OS (`/` vs `\`).
+ */
+export const FsMkdirRequestSchema = z.object({
+  /** Absolute path of the parent directory; must be inside the FS allowlist. */
+  parent: z.string().min(1).max(4096),
+  /**
+   * Single-segment folder name. Strict rules so a freshly-named path round-
+   * trips through `fs.readdir` on every supported OS:
+   *  - 1..200 characters
+   *  - not exactly `.` or `..` (escape attempts)
+   *  - no `/` or `\` (path separators)
+   *  - no NUL byte
+   *  - no leading `-` (so `rm -rf foo` never treats the name as a flag)
+   *  - no trailing space or `.` (Windows strips these silently)
+   *  - not a Windows reserved name (`CON`, `LPT1`, …)
+   */
+  name: z
+    .string()
+    .min(1)
+    .max(200)
+    .refine((n) => n !== '.' && n !== '..', 'name must not be "." or ".."')
+    .refine(
+      (n) => !n.includes('/') && !n.includes('\\'),
+      'name must not contain a path separator',
+    )
+    .refine((n) => !n.includes('\0'), 'name must not contain a NUL byte')
+    .refine((n) => !n.startsWith('-'), 'name must not start with "-"')
+    .refine(
+      (n) => !n.endsWith(' ') && !n.endsWith('.'),
+      'name must not end with space or "."',
+    )
+    .refine(
+      (n) => !WINDOWS_RESERVED_NAMES.has(n.toUpperCase()),
+      'name is reserved on Windows',
+    ),
+});
+
+/** Response payload of `POST /api/fs/mkdir` — absolute path of the new folder. */
+export const FsMkdirResponseSchema = z.object({
+  path: z.string().min(1),
+});
+
 /** Description of a single AI launcher exposed by the CLI. */
 export const ToolInfoSchema = z.object({
   /** Stable, URL-safe tool id. Lowercase letters, digits, dashes only. */
@@ -110,6 +187,15 @@ export const SessionPatchSchema = z.object({
   name: z.string().min(1).max(100),
 });
 
+/** Body of `POST /api/push/register` and `/api/push/unregister`. */
+export const PushTokenRequestSchema = z.object({
+  /** Expo push token, e.g. `ExponentPushToken[xxxx]`. */
+  token: z
+    .string()
+    .max(200)
+    .regex(/^Expo(nent)?PushToken\[[A-Za-z0-9_-]+\]$/, 'not an Expo push token'),
+});
+
 /** Response payload of `GET /api/sessions`. */
 export const SessionsResponseSchema = z.object({
   sessions: z.array(SessionInfoSchema),
@@ -132,8 +218,17 @@ export const HealthResponseSchema = z.object({
  * from the URL; client-side the app builds it from user choices.
  */
 export const PtyHelloQuerySchema = z.object({
-  /** Absolute working directory for the spawned process. */
-  cwd: z.string().min(1).max(4096),
+  /**
+   * Absolute working directory for a NEW session.
+   *
+   * Optional, and deliberately so: only the daemon knows what a valid path
+   * looks like on its own OS, and a client guessing one gets it wrong across
+   * platforms — the app used to send `/tmp`, which doesn't exist on Windows,
+   * so every session resume was rejected with `invalid cwd`. When omitted the
+   * daemon uses its own root ($HOME, or PILOT_FS_ROOT). Ignored entirely when
+   * re-attaching to a live session, which already has a working directory.
+   */
+  cwd: z.string().min(1).max(4096).optional(),
   /** Tool id from `GET /api/tools` — must match the same regex as ToolInfo.id. */
   tool: z
     .string()

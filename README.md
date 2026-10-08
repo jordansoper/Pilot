@@ -8,11 +8,11 @@ Remote CLI connector — pair your phone with your dev machines over **Tailscale
 
 This is a **pnpm** monorepo with three packages:
 
-| Package | Role |
-|---|---|
-| [`packages/shared`](./packages/shared) | Zod schemas + TS types shared by cli and app. The single source of truth for the REST/WS contract. |
-| [`packages/cli`](./packages/cli) | `pilot-cli` — daemon that runs on the dev machine. Bun/Node + TypeScript. |
-| [`packages/app`](./packages/app) | `pilot-app` — React Native + Expo, Android-first. |
+| Package                                  | Role                                                                                                                                                                                                                  |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`packages/shared`](./packages/shared)   | Zod schemas + TS types shared by cli and app. The single source of truth for the REST/WS contract.                                                                                                                    |
+| [`packages/cli`](./packages/cli)         | `pilot-cli` — daemon that runs on the dev machine. Bun/Node + TypeScript.                                                                                                                                             |
+| [`packages/app`](./packages/app)         | `pilot-app` — React Native + Expo, Android-first.                                                                                                                                                                     |
 | [`packages/desktop`](./packages/desktop) | `pilot-desktop` — **Phase 6 scaffold.** Electron app that launches the daemon and shows the pairing QR in a window. Run: `pnpm --filter @pilot/desktop start`. Not yet self-contained (uses system `node`) or signed. |
 
 ## Quick start
@@ -59,7 +59,13 @@ picker, folder picker for new sessions, multi-machine, settings/reset, back nav.
 
 **Next**
 
-- ⏳ **Phase A — AI tool launchers** (freebuff / Claude Code / ollama) + `/api/tools` + a tool picker. *The top priority — today it only launches `bash`.*
-- ⏳ Phase B — Terminal UX polish (Ctrl/Alt key toolbar, copy/paste, bundle xterm.js offline)
+- 🔨 **Phase A — AI tool launchers** (freebuff / Claude Code / ollama). _Daemon
+  half done:_ `GET /api/tools` reports each launcher with a live
+  installed-or-not flag, and `/ws/pty?tool=` spawns any of them. _Outstanding:_
+  the in-app tool picker, plus a model picker for ollama.
+- 🔨 Phase B — Terminal UX polish. _Done:_ Termux-style quick-key bar
+  (sticky Ctrl/Alt, Esc, Tab, arrows, ^C/^D, Home/End, PgUp/PgDn), and xterm.js
+  vendored into the app bundle so the terminal renders with no public internet.
+  _Outstanding:_ copy/paste gestures, IME height handling.
 - ⏳ Phase C — CLI daemonization for headless servers (`pilot install`)
 - ⏳ Phase D — Desktop app (macOS + Windows): self-contained, signed, single-installer GUI wrapping the daemon (scaffolded in `packages/desktop`)

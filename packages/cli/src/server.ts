@@ -7,31 +7,46 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import {
   FS_ALLOWLIST_ROOT_ENV,
+  FS_MKDIR_PATH,
   FS_PATH,
   HEALTH_PATH,
   PROTOCOL_VERSION,
+  FsMkdirRequestSchema,
   PtyHelloQuerySchema,
   SessionPatchSchema,
   SESSIONS_PATH,
+  PUSH_REGISTER_PATH,
+  PUSH_UNREGISTER_PATH,
+  PushTokenRequestSchema,
   SHARED_PACKAGE_VERSION,
+  TOOLS_PATH,
   WS_PATH,
   type FsResponse,
   type HealthResponse,
   type PtyHelloQuery,
+  type ToolsResponse,
 } from '@pilot/shared';
 import { checkBearer } from './auth.js';
-import { getLauncher } from './launchers.js';
+import { getLauncher, listTools } from './launchers.js';
 import { buildPairingPageHtml, type PairingAddress } from './pairing-page.js';
-import { SessionManager } from './sessions.js';
+import { SessionManager, type SessionClient } from './sessions.js';
+import { PushRegistry } from './push.js';
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
-/** Parsed PtyHello cache for the upgrade→connection handoff. */
-const queryCache = new WeakMap<IncomingMessage, PtyHelloQuery>();
+/**
+ * Parsed PtyHello cache for the upgrade→connection handoff. `cwd` is resolved
+ * to a concrete directory during the handshake (the wire field is optional),
+ * so everything downstream can rely on it.
+ */
+type ResolvedHello = PtyHelloQuery & { cwd: string };
+const queryCache = new WeakMap<IncomingMessage, ResolvedHello>();
 /** Liveness flag for the heartbeat, kept off the ws object. */
 const live = new WeakMap<WebSocket, boolean>();
 
 export interface ServerOptions {
+  /** Push-token store; defaults to `~/.pilot/push-tokens.json`. Tests inject one. */
+  pushRegistry?: PushRegistry;
   /** Hex bearer token, generated per CLI startup. */
   token: string;
   /** TCP port (use 0 to let the OS pick an ephemeral one). */
@@ -76,7 +91,14 @@ function rawToBuffer(data: RawData): Buffer {
  */
 export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   let actualPort = opts.port;
-  const sessions = new SessionManager();
+  const push = opts.pushRegistry ?? new PushRegistry();
+  const sessions = new SessionManager((session, summary) => {
+    void push.notify({
+      title: `${session.name ?? toolLabel(session.tool)} is waiting for you`,
+      body: summary,
+      data: { sessionId: session.id, tool: session.tool, cwd: session.cwd },
+    });
+  });
   // Pre-render the loopback pairing page once (the pairing URL is fixed for
   // the daemon's lifetime), so request handling stays synchronous.
   const pairingPageHtml = opts.pairingUrl
@@ -87,7 +109,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
       )
     : null;
   const httpServer = createServer((req, res) => {
-    handleHttp(req, res, opts, actualPort, pairingPageHtml, sessions);
+    handleHttp(req, res, opts, actualPort, pairingPageHtml, sessions, push);
   });
 
   const wss = new WebSocketServer({
@@ -97,7 +119,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
 
   httpServer.on('upgrade', (req, socket: Duplex, head: Buffer) => {
-    handleUpgrade(req, socket, head, wss, opts, actualPort);
+    handleUpgrade(req, socket, head, wss, opts, actualPort, sessions);
   });
 
   // Server-side WS heartbeat: ping every 30s. A client that misses two
@@ -215,6 +237,106 @@ function fsSegments(root: string, resolved: string): FsResponse['segments'] {
   return segments;
 }
 
+/**
+ * Read JSON request body with a hard size cap so a misbehaving client can't
+ * OOM the daemon by streaming an unbounded body. Returns `null` on either a
+ * size-overflow or a parse error; callers decide what HTTP status to send.
+ */
+async function readJsonBody(req: IncomingMessage): Promise<unknown | null> {
+  let raw = '';
+  try {
+    for await (const chunk of req) {
+      raw += chunk;
+      if (raw.length > 4096) throw new Error('body too large');
+    }
+  } catch {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Create a single directory under the allowlist root. Body:
+ * `{ parent: string, name: string }` (`FsMkdirRequestSchema`). The parent
+ * is resolved and verified to be inside the allowlist; the joined path is
+ * re-verified as defense-in-depth (so a `name` containing `..` segments
+ * can't escape even if a future schema change weakens the filter).
+ * Returns 201 with `{ path }` on success, 400 on validation, 409 if it
+ * already exists, 500 on other I/O errors.
+ */
+async function handleFsMkdir(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const parsed = FsMkdirRequestSchema.safeParse(await readJsonBody(req));
+  if (!parsed.success) {
+    sendJson(res, 400, { error: 'invalid body', issues: parsed.error.issues });
+    return;
+  }
+  const { parent, name } = parsed.data;
+  const root = fsRoot();
+  const parentResolved = path.resolve(parent);
+  if (parentResolved !== root && !parentResolved.startsWith(root + path.sep)) {
+    sendJson(res, 400, { error: 'parent outside allowlist', root });
+    return;
+  }
+  const target = path.resolve(parentResolved, name);
+  // Defense-in-depth: re-check the joined path against the allowlist so a
+  // malformed `name` can't escape even if the schema's filter is weakened.
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    sendJson(res, 400, { error: 'path outside allowlist', root });
+    return;
+  }
+  try {
+    // `recursive: false` is intentional — we want EEXIST on a duplicate, not
+    // a silent "yes I made it" because some ancestor already existed.
+    await fs.promises.mkdir(target, { recursive: false });
+    sendJson(res, 201, { path: target });
+    return;
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    if (e?.code === 'EEXIST') {
+      sendJson(res, 409, { error: 'folder already exists', path: target });
+      return;
+    }
+    // ENOENT means the parent disappeared between accept and syscall; ENOTDIR
+    // means a non-directory segment is on the path. Both surface as friendly
+    // 4xx instead of generic 500. Mirrors how `handleFs` lets `readdir` throw
+    // and reads the errno — no separate stat (avoids TOCTOU + extra I/O).
+    if (e?.code === 'ENOENT') {
+      sendJson(res, 404, { error: 'parent not found', path: parentResolved });
+      return;
+    }
+    if (e?.code === 'ENOTDIR') {
+      sendJson(res, 400, { error: 'parent is not a directory', path: parentResolved });
+      return;
+    }
+    // EACCES / EPERM are common on macOS — the daemon runs as the same user
+    // as the file picker is browsing, but paths like `~/Library/Caches` or
+    // SIP-protected dirs refuse writes. Map to a clean 403 instead of the
+    // generic 500 so the app can surface a meaningful message.
+    if (e?.code === 'EACCES' || e?.code === 'EPERM') {
+      sendJson(res, 403, {
+        error: 'permission denied (parent folder not writable)',
+        path: parentResolved,
+      });
+      return;
+    }
+    // Verbose OS details only when PILOT_DEBUG is set — don't leak paths or
+    // errno text into the production response.
+    if (process.env['PILOT_DEBUG']) {
+      sendJson(res, 500, {
+        error: 'mkdir failed',
+        code: e?.code ?? 'UNKNOWN',
+        message: e?.message ?? '',
+      });
+    } else {
+      sendJson(res, 500, { error: 'mkdir failed' });
+    }
+  }
+}
+
 /** Browse a directory under the allowlist root. Ends the response. */
 async function handleFs(res: ServerResponse, url: URL): Promise<void> {
   const root = fsRoot();
@@ -298,6 +420,27 @@ async function handleSessionPatch(
   sendJson(res, 200, { session });
 }
 
+function toolLabel(id: string): string {
+  return listTools().find((t) => t.id === id)?.label ?? id;
+}
+
+/** `POST /api/push/register` | `/api/push/unregister` — body `{ token }`. */
+async function handlePushToken(
+  req: IncomingMessage,
+  res: ServerResponse,
+  push: PushRegistry,
+  register: boolean,
+): Promise<void> {
+  const parsed = PushTokenRequestSchema.safeParse(await readJsonBody(req));
+  if (!parsed.success) {
+    sendJson(res, 400, { error: 'invalid body', issues: parsed.error.issues });
+    return;
+  }
+  if (register) push.register(parsed.data.token);
+  else push.unregister(parsed.data.token);
+  sendJson(res, 200, { ok: true });
+}
+
 function handleHttp(
   req: IncomingMessage,
   res: ServerResponse,
@@ -305,6 +448,7 @@ function handleHttp(
   actualPort: number,
   pairingPageHtml: string | null,
   sessions: SessionManager,
+  push: PushRegistry,
 ): void {
   debugLog(req, 'HTTP');
   const url = new URL(req.url ?? '/', `http://${opts.bind}:${actualPort}`);
@@ -329,11 +473,25 @@ function handleHttp(
 
   // Loopback pairing page is GET-only (it's served before this method guard).
   // DELETE and PATCH are only meaningful for `/api/sessions/:id`.
-  if (req.method !== 'GET' && req.method !== 'DELETE' && req.method !== 'PATCH') {
+  if (
+    req.method !== 'GET' &&
+    req.method !== 'DELETE' &&
+    req.method !== 'PATCH' &&
+    req.method !== 'POST'
+  ) {
     sendJson(res, 405, { error: 'method not allowed' });
     return;
   }
   if (url.pathname === HEALTH_PATH) {
+    // GET-only. The top-of-function method guard historically allowed any
+    // verb past auth as long as it was GET/DELETE/PATCH; the request landed
+    // here with no method check and silently returned the health body. With
+    // `POST` now in that global allow-list (for `/api/fs/mkdir`), a tight
+    // 405 here closes the same leak for every non-GET verb.
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
     // process.uptime() is monotonic; Date.now() can jump on NTP corrections.
     // actualPort (not opts.port) so a smoke test using port=0 reports the
     // OS-assigned ephemeral value.
@@ -344,6 +502,23 @@ function handleHttp(
       port: actualPort,
     };
     sendJson(res, 200, body);
+    return;
+  }
+  if (url.pathname === TOOLS_PATH) {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
+    const body: ToolsResponse = { tools: listTools() };
+    sendJson(res, 200, body);
+    return;
+  }
+  if (url.pathname === PUSH_REGISTER_PATH || url.pathname === PUSH_UNREGISTER_PATH) {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
+    void handlePushToken(req, res, push, url.pathname === PUSH_REGISTER_PATH);
     return;
   }
   if (url.pathname === SESSIONS_PATH) {
@@ -385,7 +560,19 @@ function handleHttp(
     return;
   }
   if (url.pathname === FS_PATH) {
+    if (req.method !== 'GET') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
     void handleFs(res, url);
+    return;
+  }
+  if (url.pathname === FS_MKDIR_PATH) {
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
+    void handleFsMkdir(req, res);
     return;
   }
   sendJson(res, 404, { error: 'not found' });
@@ -406,6 +593,7 @@ function handleUpgrade(
   wss: WebSocketServer,
   opts: ServerOptions,
   actualPort: number,
+  sessions: SessionManager,
 ): void {
   debugLog(req, 'WS-upgrade');
   const url = new URL(req.url ?? '/', `http://${opts.bind}:${actualPort}`);
@@ -428,18 +616,38 @@ function handleUpgrade(
     return;
   }
   const hello = parsed.data;
+
+  // Re-attaching to a live session? Then the cwd is irrelevant — the PTY is
+  // already running somewhere — so don't validate it, and inherit the
+  // session's own directory. Validating here is what broke every resume from
+  // the app on Windows: it sends no cwd for a resume, the old default was
+  // `/tmp`, and that doesn't exist on Windows, so the upgrade was rejected
+  // with a 400 the client could only report as "websocket error".
+  const live = hello.session ? sessions.getLive(hello.session) : undefined;
+  if (live) {
+    queryCache.set(req, { ...hello, cwd: live.cwd });
+    wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
+      wss.emit('connection', ws, req);
+    });
+    return;
+  }
+
+  // A new session (or a resume whose session is gone): fall back to the
+  // daemon's own root rather than making the client guess a path that exists
+  // on this OS.
+  const cwd = hello.cwd ?? fsRoot();
   try {
-    const stat = fs.statSync(hello.cwd);
+    const stat = fs.statSync(cwd);
     if (!stat.isDirectory()) throw new Error('not a directory');
   } catch {
     socket.write(
       'HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n' +
-        JSON.stringify({ error: 'invalid cwd', cwd: hello.cwd }),
+        JSON.stringify({ error: 'invalid cwd', cwd }),
     );
     socket.destroy();
     return;
   }
-  queryCache.set(req, hello);
+  queryCache.set(req, { ...hello, cwd });
   wss.handleUpgrade(req, socket, head, (ws: WebSocket) => {
     wss.emit('connection', ws, req);
   });
@@ -521,9 +729,6 @@ function handlePtyConnection(
     return;
   }
   const { session, resumed } = attached;
-  session.owner = ws;
-  session.attached = true;
-
   // The block below is synchronous — no awaits — so no live PTY output (which
   // fires on a later tick) can interleave before the scrollback replay.
   sendControl(ws, {
@@ -539,24 +744,28 @@ function handlePtyConnection(
       /* socket already gone */
     }
   }
-  session.sink = (data: string) => {
-    try {
-      ws.send(data);
-    } catch {
-      /* socket already gone */
-    }
+  const client: SessionClient = {
+    send(data) {
+      try {
+        ws.send(data);
+      } catch {
+        /* socket already gone */
+      }
+    },
+    exit(payload) {
+      sendControl(ws, { type: 'exit', protocol: PROTOCOL_VERSION, ...payload });
+      try {
+        ws.close(1000, 'pty exited');
+      } catch {
+        /* already closed */
+      }
+    },
   };
-  session.onExit = (payload) => {
-    sendControl(ws, { type: 'exit', protocol: PROTOCOL_VERSION, ...payload });
-    try {
-      ws.close(1000, 'pty exited');
-    } catch {
-      /* already closed */
-    }
-  };
+  mgr.attach(session, client);
 
   ws.on('message', (data: RawData, isBinary) => {
     if (isBinary) {
+      mgr.noteInput(session);
       try {
         session.term.write(rawToBuffer(data));
       } catch {
@@ -566,6 +775,7 @@ function handlePtyConnection(
     }
     const text = typeof data === 'string' ? data : rawToBuffer(data).toString('utf8');
     const control = parseResize(text);
+    if (!control) mgr.noteInput(session);
     if (control) {
       try {
         session.term.resize(control.cols, control.rows);
@@ -584,8 +794,7 @@ function handlePtyConnection(
   ws.on('close', () => {
     live.delete(ws);
     // Detach only — the shell keeps running so the client can re-attach and
-    // resume. Guard against a stale socket detaching a session that a newer
-    // client has already taken over.
-    if (session.owner === ws) mgr.detach(session);
+    // resume. Other attached devices keep streaming.
+    mgr.detach(session, client);
   });
 }

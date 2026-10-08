@@ -13,6 +13,15 @@
 const { hostname } = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+
+// Dynamic import() takes a URL, not a path. On Windows an absolute path like
+// `C:\…\server.js` is rejected outright — the ESM loader reads `c:` as a URL
+// scheme (ERR_UNSUPPORTED_ESM_URL_SCHEME). POSIX paths only work by accident
+// of starting with `/`, so convert everywhere rather than branching.
+function importPath(...segments) {
+  return import(pathToFileURL(path.join(...segments)).href);
+}
 
 // Resolve CLI and shared dist paths.
 function resolveDist(envKey, ...fallbackRel) {
@@ -37,6 +46,24 @@ async function main() {
   // at app.asar.unpacked/node_modules/ and symlink them into cli-dist so
   // the CLI's ESM imports resolve correctly.
   function ensureModuleResolution() {
+    // Mark both dists as ESM. This runs FIRST because on Windows the shims
+    // below are physical copies — a package.json written after them would
+    // never reach the copy, and `@pilot/shared` would load as CommonJS.
+    const sharedPkgJson = path.join(sharedDist, 'package.json');
+    if (!fs.existsSync(sharedPkgJson)) {
+      fs.writeFileSync(
+        sharedPkgJson,
+        JSON.stringify({ name: '@pilot/shared', type: 'module', main: './index.js' }),
+        'utf8',
+      );
+    }
+    // type:module so Node treats cli-dist's .js files (ESM import/export) as
+    // ES modules.
+    const cliPkgJson = path.join(cliDist, 'package.json');
+    if (!fs.existsSync(cliPkgJson)) {
+      fs.writeFileSync(cliPkgJson, JSON.stringify({ type: 'module' }), 'utf8');
+    }
+
     // Production: cli-dist sits next to app.asar.unpacked in Resources/. The
     // forked Node process can't resolve packages inside app.asar, so cli-dist
     // gets a node_modules shim pointing at a real copy of the unpacked
@@ -45,7 +72,11 @@ async function main() {
     // the bundle is moved, e.g. dist → /Applications) and created
     // cli-dist/node_modules as a real dir that shadowed the unpacked modules,
     // so a shim that exists must still be verified, not trusted.
-    const asarUnpackedNm = path.join(path.dirname(cliDist), 'app.asar.unpacked', 'node_modules');
+    const asarUnpackedNm = path.join(
+      path.dirname(cliDist),
+      'app.asar.unpacked',
+      'node_modules',
+    );
     if (fs.existsSync(asarUnpackedNm)) {
       // Windows can't create symlinks without admin/Developer Mode, so shims
       // there are physical copies (matching after-pack.cjs).
@@ -126,39 +157,18 @@ async function main() {
         }
       }
     }
-
-    // Ensure the shared dist has a package.json so it's recognized as a module.
-    const sharedPkgJson = path.join(sharedDist, 'package.json');
-    if (!fs.existsSync(sharedPkgJson)) {
-      fs.writeFileSync(
-        sharedPkgJson,
-        JSON.stringify({ name: '@pilot/shared', type: 'module', main: './index.js' }),
-        'utf8',
-      );
-    }
-
-    // Ensure the CLI dist has a package.json with type:module so Node
-    // treats its .js files (which use ESM import/export) as ES modules.
-    const cliPkgJson = path.join(cliDist, 'package.json');
-    if (!fs.existsSync(cliPkgJson)) {
-      fs.writeFileSync(
-        cliPkgJson,
-        JSON.stringify({ type: 'module' }),
-        'utf8',
-      );
-    }
   }
 
   ensureModuleResolution();
 
   // ── Import CLI modules (all ESM) ──────────────────────────────────────
 
-  const serverModule = await import(path.join(cliDist, 'server.js'));
-  const tailscaleModule = await import(path.join(cliDist, 'tailscale.js'));
-  const networkModule = await import(path.join(cliDist, 'network.js'));
-  const tokenModule = await import(path.join(cliDist, 'token.js'));
-  const pairingModule = await import(path.join(cliDist, 'pairing.js'));
-  const sharedModule = await import(path.join(sharedDist, 'index.js'));
+  const serverModule = await importPath(cliDist, 'server.js');
+  const tailscaleModule = await importPath(cliDist, 'tailscale.js');
+  const networkModule = await importPath(cliDist, 'network.js');
+  const tokenModule = await importPath(cliDist, 'token.js');
+  const pairingModule = await importPath(cliDist, 'pairing.js');
+  const sharedModule = await importPath(sharedDist, 'index.js');
 
   const { startServer } = serverModule;
   const { getTailscaleIp } = tailscaleModule;
@@ -178,16 +188,28 @@ async function main() {
     addresses.push({ address: `${tailscaleIp}:${port}`, label: 'Tailscale — anywhere' });
   }
   for (const lan of getLanIpv4s()) {
-    addresses.push({ address: `${lan.address}:${port}`, label: `Local network (${lan.iface}) — same Wi-Fi` });
+    addresses.push({
+      address: `${lan.address}:${port}`,
+      label: `Local network (${lan.iface}) — same Wi-Fi`,
+    });
   }
   if (addresses.length === 0) {
     addresses.push({ address: `${bind}:${port}`, label: 'Local' });
   }
 
-  const hosts = [...(tailscaleIp ? [tailscaleIp] : []), ...getLanIpv4s().map((l) => l.address)];
+  const hosts = [
+    ...(tailscaleIp ? [tailscaleIp] : []),
+    ...getLanIpv4s().map((l) => l.address),
+  ];
   if (hosts.length === 0) hosts.push(bind);
 
-  const payload = buildPairingPayload({ host: hosts[0], hosts, port, token: tokenResult.token, name });
+  const payload = buildPairingPayload({
+    host: hosts[0],
+    hosts,
+    port,
+    token: tokenResult.token,
+    name,
+  });
   const pairingUrl = buildPairingUrl(payload);
 
   // Forward logs to parent.

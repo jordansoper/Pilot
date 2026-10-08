@@ -1,191 +1,34 @@
-import { useEffect, useState } from 'react';
-import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
+import * as Clipboard from 'expo-clipboard';
 import { listMachines } from '../storage.js';
 import type { PairedMachine } from '../types.js';
+import { renderHtml } from '../terminal-html.js';
+
+const BASE_URL = 'http://pilot.local';
 
 /**
- * The static HTML body loaded into the WebView. Self-contained: imports
- * xterm.js + FitAddon from jsDelivr, opens a WebSocket directly back to
- * the CLI (faster than routing PTY bytes through the RN bridge), forwards
- * keystrokes, mirrors resize, and posts `{type:'ready'|'size'|'closed'}`
- * messages back to React Native.
- *
- * The token is sent as the WebSocket subprotocol entry — the only auth
- * path that works from a browser-style WebView, since custom headers are
- * not allowed on `new WebSocket(...)` outside of Node clients.
- *
- * Placeholders `__HOST__`, `__PORT__`, `__TOKEN__`, `__CWD__`, `__COLS__`,
- * `__ROWS__` are interpolated by literal string substitution at render
- * time, NOT via DOM mutation after load (more robust than `history.replaceState`).
+ * Termux-style quick keys. A soft keyboard can't produce Esc, Tab, Ctrl or
+ * arrows, which makes a real shell — let alone vim or a TUI — unusable without
+ * them. Ctrl and Alt are sticky toggles handled inside the WebView (see
+ * `terminal-html.ts`): they arm a modifier applied to the next typed
+ * character, rather than sending anything on their own.
  */
-const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
-<html><head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no" />
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
-<style>
-  html, body { margin: 0; padding: 0; height: 100%; background: #1a1a1a; color: #d0d0d0; }
-  #term { position: absolute; inset: 0; padding: 4px; }
-  .xterm-viewport, .xterm-screen { background: #1a1a1a !important; }
-</style>
-</head><body>
-<div id="term"></div>
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-<script>
-(function () {
-  var HOST = "__HOST__";
-  var PORT = "__PORT__";
-  var TOKEN = "__TOKEN__";
-  var CWD = "__CWD__";
-  var COLS = parseInt("__COLS__", 10) || 80;
-  var ROWS = parseInt("__ROWS__", 10) || 24;
-  var SESSION = "__SESSION__"; // stored session id to resume, or empty
-
-  function post(msg) {
-    if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-      window.ReactNativeWebView.postMessage(JSON.stringify(msg));
-    }
-  }
-
-  if (!HOST || !PORT || !TOKEN) {
-    post({ type: 'error', message: 'missing host/port/token in URL' });
-    return;
-  }
-
-  var term = new window.Terminal({
-    cursorBlink: true,
-    fontFamily: 'Menlo, Courier New, monospace',
-    fontSize: 12,
-    cols: COLS, rows: ROWS,
-    theme: { background: '#1a1a1a', foreground: '#d0d0d0', cursor: '#f8f8f0' }
-  });
-  var fit = new window.FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open(document.getElementById('term'));
-  try { fit.fit(); } catch (_) { /* terminal may not yet be measurable */ }
-
-  // The shell lives on the daemon and survives disconnects. We reconnect on
-  // drop (e.g. returning from the background) and re-attach to the same
-  // session by id — the daemon replays the scrollback, so you land back
-  // exactly where you left off.
-  var currentSession = SESSION || null;
-  var ws = null;
-  var retry = 0;
-  var stopped = false; // true once the shell exits — no more reconnects
-
-  function wsUrl() {
-    var u = 'ws://' + HOST + ':' + PORT + '/ws/pty'
-      + '?cwd=' + encodeURIComponent(CWD)
-      + '&tool=bash'
-      + '&cols=' + term.cols
-      + '&rows=' + term.rows;
-    if (currentSession) u += '&session=' + encodeURIComponent(currentSession);
-    return u;
-  }
-
-  // Control frames arrive as BINARY (ArrayBuffer); PTY output arrives as text.
-  function decodeControl(buf) {
-    var bytes = new Uint8Array(buf);
-    var s = '';
-    for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
-    try { return JSON.parse(s); } catch (_) { return null; }
-  }
-
-  function connect() {
-    // token is sent as the subprotocol entry — the CLI auth.ts bridges this.
-    ws = new WebSocket(wsUrl(), TOKEN);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = function () {
-      retry = 0;
-      try { fit.fit(); } catch (_) {}
-      post({ type: 'ready', cols: term.cols, rows: term.rows });
-    };
-    ws.onmessage = function (ev) {
-      if (typeof ev.data === 'string') { term.write(ev.data); return; }
-      var msg = decodeControl(ev.data);
-      if (!msg) return;
-      if (msg.type === 'session') {
-        currentSession = msg.id;
-        post({ type: 'session', id: msg.id, resumed: !!msg.resumed });
-        // Resuming: clear whatever is on screen; the replay that follows
-        // rebuilds it, avoiding duplicated scrollback.
-        if (msg.resumed) { term.reset(); }
-      } else if (msg.type === 'exit') {
-        stopped = true;
-        currentSession = null;
-        term.write('\\r\\n\\x1b[2m── session ended ──\\x1b[0m\\r\\n');
-        post({ type: 'exit', exitCode: msg.exitCode });
-      }
-    };
-    ws.onclose = function (ev) {
-      post({ type: 'closed', code: ev.code, reason: ev.reason || '' });
-      if (stopped || ev.code === 1000) return; // exited cleanly — stop
-      retry = Math.min(retry + 1, 6);
-      var delay = Math.min(1000 * Math.pow(2, retry - 1), 10000);
-      post({ type: 'reconnecting', inMs: delay });
-      setTimeout(connect, delay);
-    };
-    ws.onerror = function () {
-      post({ type: 'error', message: 'websocket error' });
-    };
-  }
-
-  term.onData(function (data) {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
-  });
-  term.onResize(function (sz) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'resize', cols: sz.cols, rows: sz.rows }));
-    }
-    post({ type: 'size', cols: sz.cols, rows: sz.rows });
-  });
-
-  window.addEventListener('resize', function () {
-    try { fit.fit(); } catch (_) {}
-  });
-
-  connect();
-})();
-</script>
-</body></html>`;
-
-/** Substitute __PLACEHOLDER__ markers with literal-but-safe strings. */
-function renderHtml(opts: {
-  host: string;
-  port: string;
-  token: string;
-  cwd: string;
-  cols: number;
-  rows: number;
-  session: string;
-}): string {
-  return TERMINAL_HTML_TEMPLATE.replace(/__([A-Z]+)__/g, (_, key: string) => {
-    switch (key) {
-      case 'HOST':
-        return opts.host;
-      case 'PORT':
-        return opts.port;
-      case 'TOKEN':
-        return opts.token;
-      case 'CWD':
-        return opts.cwd;
-      case 'COLS':
-        return String(opts.cols);
-      case 'ROWS':
-        return String(opts.rows);
-      case 'SESSION':
-        return opts.session;
-      default:
-        return '';
-    }
-  });
-}
-
-const DEFAULT_CWD = '/tmp';
-const BASE_URL = 'http://pilot.local';
+const QUICK_KEYS: ReadonlyArray<{ label: string; key: string }> = [
+  { label: 'Esc', key: 'esc' },
+  { label: 'Tab', key: 'tab' },
+  { label: '↑', key: 'up' },
+  { label: '↓', key: 'down' },
+  { label: '←', key: 'left' },
+  { label: '→', key: 'right' },
+  { label: '^C', key: 'ctrl-c' },
+  { label: '^D', key: 'ctrl-d' },
+  { label: 'Home', key: 'home' },
+  { label: 'End', key: 'end' },
+  { label: 'PgUp', key: 'pgup' },
+  { label: 'PgDn', key: 'pgdn' },
+];
 
 export interface TerminalScreenProps {
   machineId: string;
@@ -193,6 +36,10 @@ export interface TerminalScreenProps {
   sessionId?: string;
   /** Working directory for a NEW session (from the folder picker). */
   cwd?: string;
+  /** Tool id for a NEW session; defaults to the shell. */
+  tool?: string | undefined;
+  /** Model for tools that take one (ollama). */
+  model?: string | undefined;
   onBack: () => void;
 }
 
@@ -200,11 +47,33 @@ export function TerminalScreen({
   machineId,
   sessionId,
   cwd,
+  tool,
+  model,
   onBack,
 }: TerminalScreenProps) {
   const [machine, setMachine] = useState<PairedMachine | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string>('connecting…');
+  const [ctrlArmed, setCtrlArmed] = useState(false);
+  const [altArmed, setAltArmed] = useState(false);
+  const webRef = useRef<WebView>(null);
+
+  // `true;` at the end keeps Android's evaluateJavascript from warning about a
+  // non-serialisable return value.
+  const sendKey = useCallback((key: string) => {
+    webRef.current?.injectJavaScript(`window.pilotKey(${JSON.stringify(key)});true;`);
+  }, []);
+  const copySelection = useCallback(() => {
+    webRef.current?.injectJavaScript('window.pilotCopy();true;');
+  }, []);
+  const pasteClipboard = useCallback(async () => {
+    const text = await Clipboard.getStringAsync();
+    if (!text) return;
+    webRef.current?.injectJavaScript(`window.pilotPaste(${JSON.stringify(text)});true;`);
+  }, []);
+  const toggleModifier = useCallback((mod: 'ctrl' | 'alt') => {
+    webRef.current?.injectJavaScript(`window.pilotToggle(${JSON.stringify(mod)});true;`);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -231,7 +100,19 @@ export function TerminalScreen({
       else if (msg.type === 'reconnecting') setStatus('reconnecting…');
       else if (msg.type === 'error') setError(msg.message ?? 'error');
       else if (msg.type === 'size') setStatus(`connected · ${msg.cols}×${msg.rows}`);
-      else if (msg.type === 'session') {
+      else if (msg.type === 'copy') {
+        if (typeof msg.text === 'string' && msg.text) {
+          void Clipboard.setStringAsync(msg.text);
+          setStatus('copied');
+        } else {
+          setStatus('long-press a line to select, then Copy');
+        }
+      } else if (msg.type === 'modifiers') {
+        // The WebView owns modifier state — it clears them once the next
+        // character consumes them, so the buttons follow rather than lead.
+        setCtrlArmed(!!msg.ctrl);
+        setAltArmed(!!msg.alt);
+      } else if (msg.type === 'session') {
         setStatus(msg.resumed ? 'resumed session' : 'new session');
       } else if (msg.type === 'exit') {
         setStatus('session ended');
@@ -270,10 +151,15 @@ export function TerminalScreen({
     host: machine.lastGoodHost ?? machine.hosts[0] ?? machine.host,
     port: String(machine.port),
     token: machine.token,
-    cwd: cwd ?? DEFAULT_CWD,
+    // Empty means "no opinion" — the daemon picks its own root. Guessing here
+    // is what broke resumes on Windows: the old `/tmp` fallback doesn't exist
+    // there, and the daemon rejected the handshake with `invalid cwd`.
+    cwd: cwd ?? '',
     cols: 80,
     rows: 24,
     session: sessionId ?? '',
+    tool: tool ?? 'bash',
+    model: model ?? '',
   });
 
   return (
@@ -281,6 +167,7 @@ export function TerminalScreen({
       <Header onBack={onBack} status={status} />
       <View style={styles.web}>
         <WebView
+          ref={webRef}
           style={styles.web}
           originWhitelist={['*']}
           source={{ html, baseUrl: BASE_URL }}
@@ -297,6 +184,66 @@ export function TerminalScreen({
           key={`${machine.id}|${sessionId ?? `new:${cwd ?? ''}`}`}
         />
       </View>
+      <KeyBar
+        ctrlArmed={ctrlArmed}
+        altArmed={altArmed}
+        onKey={sendKey}
+        onToggle={toggleModifier}
+        onCopy={copySelection}
+        onPaste={() => void pasteClipboard()}
+      />
+    </View>
+  );
+}
+
+function KeyBar({
+  ctrlArmed,
+  altArmed,
+  onKey,
+  onToggle,
+  onCopy,
+  onPaste,
+}: {
+  ctrlArmed: boolean;
+  altArmed: boolean;
+  onKey: (key: string) => void;
+  onToggle: (mod: 'ctrl' | 'alt') => void;
+  onCopy: () => void;
+  onPaste: () => void;
+}) {
+  return (
+    <View style={styles.bar}>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        keyboardShouldPersistTaps="always"
+        contentContainerStyle={styles.barContent}
+      >
+        {/* Sticky modifiers first — they read as state, not actions. */}
+        <TouchableOpacity
+          onPress={() => onToggle('ctrl')}
+          style={[styles.key, ctrlArmed && styles.keyArmed]}
+        >
+          <Text style={[styles.keyText, ctrlArmed && styles.keyTextArmed]}>Ctrl</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => onToggle('alt')}
+          style={[styles.key, altArmed && styles.keyArmed]}
+        >
+          <Text style={[styles.keyText, altArmed && styles.keyTextArmed]}>Alt</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={onCopy} style={styles.key}>
+          <Text style={styles.keyText}>Copy</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={onPaste} style={styles.key}>
+          <Text style={styles.keyText}>Paste</Text>
+        </TouchableOpacity>
+        {QUICK_KEYS.map((k) => (
+          <TouchableOpacity key={k.key} onPress={() => onKey(k.key)} style={styles.key}>
+            <Text style={styles.keyText}>{k.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
     </View>
   );
 }
@@ -333,18 +280,26 @@ const styles = StyleSheet.create({
   backText: { color: '#9ca3af', fontSize: 14 },
   status: { color: '#9ca3af', fontSize: 12, flex: 1, textAlign: 'right' },
   bar: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
     backgroundColor: '#0f1115',
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderBottomWidth: StyleSheet.hairlineWidth,
     borderColor: '#2a2f3a',
   },
-  cwdInput: {
-    color: '#fff',
-    fontFamily: 'Menlo',
-    fontSize: 12,
-    padding: 6,
+  barContent: {
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    gap: 6,
   },
+  key: {
+    minWidth: 44, // Android's minimum comfortable touch target.
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 6,
+    backgroundColor: '#1b2029',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  keyArmed: { backgroundColor: '#2563eb' },
+  keyText: { color: '#d1d5db', fontSize: 13, fontWeight: '600' },
+  keyTextArmed: { color: '#fff' },
   web: { flex: 1, backgroundColor: '#1a1a1a' },
 });
