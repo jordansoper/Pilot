@@ -13,18 +13,21 @@ import {
   PROTOCOL_VERSION,
   FsMkdirRequestSchema,
   PtyHelloQuerySchema,
-  SessionPatchSchema,
   SESSIONS_PATH,
   PUSH_REGISTER_PATH,
   PUSH_UNREGISTER_PATH,
   PushTokenRequestSchema,
+  SETTINGS_PATH,
+  SessionUpdateSchema,
+  SettingsUpdateSchema,
   SHARED_PACKAGE_VERSION,
   TOOLS_PATH,
   WS_PATH,
   type FsResponse,
   type HealthResponse,
   type PtyHelloQuery,
-  type ToolsResponse,
+  type SettingsResponse,
+  type SettingsUpdateResponse,
 } from '@pilot/shared';
 import { checkBearer } from './auth.js';
 import { getLauncher, listTools } from './launchers.js';
@@ -72,6 +75,15 @@ export interface RunningServer {
   close: () => Promise<void>;
 }
 
+/** Mutable daemon settings, updated via PUT /api/settings. */
+export interface DaemonSettings {
+  port: number;
+  bind: string;
+  name: string;
+  fsRoot: string;
+  tailscaleIp: string | null;
+}
+
 /**
  * Normalize any ws RawData variant to a Buffer for term.write. In Node
  * `ws@8` binary frames arrive as `Buffer`, but we narrow defensively so an
@@ -108,8 +120,19 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
         opts.pairingAddresses ?? [],
       )
     : null;
+  // Mutable daemon settings — fsRoot resolved once at startup, but
+  // overridable via PUT /api/settings (name/fsRoot take effect immediately;
+  // port/bind require restart).
+  const settings: DaemonSettings = {
+    port: actualPort,
+    bind: opts.bind,
+    name: opts.machineName ?? 'this machine',
+    fsRoot: path.resolve(process.env[FS_ALLOWLIST_ROOT_ENV] || homedir()),
+    tailscaleIp: opts.tailscaleIp,
+  };
+
   const httpServer = createServer((req, res) => {
-    handleHttp(req, res, opts, actualPort, pairingPageHtml, sessions, push);
+    handleHttp(req, res, opts, actualPort, pairingPageHtml, sessions, settings, push);
   });
 
   const wss = new WebSocketServer({
@@ -119,7 +142,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
   });
 
   httpServer.on('upgrade', (req, socket: Duplex, head: Buffer) => {
-    handleUpgrade(req, socket, head, wss, opts, actualPort, sessions);
+    handleUpgrade(req, socket, head, wss, opts, actualPort, sessions, settings);
   });
 
   // Server-side WS heartbeat: ping every 30s. A client that misses two
@@ -214,9 +237,12 @@ function debugLog(req: IncomingMessage, kind: string): void {
   );
 }
 
-/** Allowlist root for `/api/fs` — nothing above this is browsable. */
-function fsRoot(): string {
-  return path.resolve(process.env[FS_ALLOWLIST_ROOT_ENV] || homedir());
+/**
+ * Resolve the effective FS allowlist root. Settings take precedence over
+ * the env var; env var takes precedence over $HOME.
+ */
+function resolveFsRoot(settings: DaemonSettings): string {
+  return path.resolve(settings.fsRoot);
 }
 
 /**
@@ -242,7 +268,7 @@ function fsSegments(root: string, resolved: string): FsResponse['segments'] {
  * OOM the daemon by streaming an unbounded body. Returns `null` on either a
  * size-overflow or a parse error; callers decide what HTTP status to send.
  */
-async function readJsonBody(req: IncomingMessage): Promise<unknown | null> {
+async function readSmallJson(req: IncomingMessage): Promise<unknown | null> {
   let raw = '';
   try {
     for await (const chunk of req) {
@@ -268,14 +294,18 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown | null> {
  * Returns 201 with `{ path }` on success, 400 on validation, 409 if it
  * already exists, 500 on other I/O errors.
  */
-async function handleFsMkdir(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  const parsed = FsMkdirRequestSchema.safeParse(await readJsonBody(req));
+async function handleFsMkdir(
+  req: IncomingMessage,
+  res: ServerResponse,
+  settings: DaemonSettings,
+): Promise<void> {
+  const parsed = FsMkdirRequestSchema.safeParse(await readSmallJson(req));
   if (!parsed.success) {
     sendJson(res, 400, { error: 'invalid body', issues: parsed.error.issues });
     return;
   }
   const { parent, name } = parsed.data;
-  const root = fsRoot();
+  const root = resolveFsRoot(settings);
   const parentResolved = path.resolve(parent);
   if (parentResolved !== root && !parentResolved.startsWith(root + path.sep)) {
     sendJson(res, 400, { error: 'parent outside allowlist', root });
@@ -338,8 +368,8 @@ async function handleFsMkdir(req: IncomingMessage, res: ServerResponse): Promise
 }
 
 /** Browse a directory under the allowlist root. Ends the response. */
-async function handleFs(res: ServerResponse, url: URL): Promise<void> {
-  const root = fsRoot();
+async function handleFs(res: ServerResponse, url: URL, settings: DaemonSettings): Promise<void> {
+  const root = resolveFsRoot(settings);
   const requested = url.searchParams.get('path');
   const resolved = requested ? path.resolve(requested) : root;
   // Reject anything outside the root (path-escape protection).
@@ -376,50 +406,6 @@ async function handleFs(res: ServerResponse, url: URL): Promise<void> {
   }
 }
 
-/**
- * `PATCH /api/sessions/:id` — rename a session. Body: `{ name: string }`
- * (1–100 chars). Responds with the updated session snapshot.
- */
-async function handleSessionPatch(
-  req: IncomingMessage,
-  res: ServerResponse,
-  sessions: SessionManager,
-  id: string,
-): Promise<void> {
-  let raw = '';
-  try {
-    for await (const chunk of req) {
-      raw += chunk;
-      if (raw.length > 4096) throw new Error('body too large');
-    }
-  } catch {
-    sendJson(res, 400, { error: 'could not read body' });
-    return;
-  }
-  let parsed;
-  try {
-    parsed = SessionPatchSchema.safeParse(JSON.parse(raw));
-  } catch {
-    sendJson(res, 400, { error: 'invalid JSON body' });
-    return;
-  }
-  if (!parsed.success) {
-    sendJson(res, 400, { error: 'invalid body', issues: parsed.error.issues });
-    return;
-  }
-  const name = parsed.data.name.trim();
-  if (!name) {
-    sendJson(res, 400, { error: 'name must not be blank' });
-    return;
-  }
-  if (!sessions.rename(id, name)) {
-    sendJson(res, 404, { error: 'session not found' });
-    return;
-  }
-  const session = sessions.list().find((s) => s.id === id);
-  sendJson(res, 200, { session });
-}
-
 function toolLabel(id: string): string {
   return listTools().find((t) => t.id === id)?.label ?? id;
 }
@@ -431,7 +417,7 @@ async function handlePushToken(
   push: PushRegistry,
   register: boolean,
 ): Promise<void> {
-  const parsed = PushTokenRequestSchema.safeParse(await readJsonBody(req));
+  const parsed = PushTokenRequestSchema.safeParse(await readSmallJson(req));
   if (!parsed.success) {
     sendJson(res, 400, { error: 'invalid body', issues: parsed.error.issues });
     return;
@@ -448,6 +434,7 @@ function handleHttp(
   actualPort: number,
   pairingPageHtml: string | null,
   sessions: SessionManager,
+  settings: DaemonSettings,
   push: PushRegistry,
 ): void {
   debugLog(req, 'HTTP');
@@ -471,111 +458,210 @@ function handleHttp(
     return;
   }
 
-  // Loopback pairing page is GET-only (it's served before this method guard).
-  // DELETE and PATCH are only meaningful for `/api/sessions/:id`.
-  if (
-    req.method !== 'GET' &&
-    req.method !== 'DELETE' &&
-    req.method !== 'PATCH' &&
-    req.method !== 'POST'
-  ) {
+  // ── Per-session routes: /api/sessions/<uuid> ────────────────────
+  if (url.pathname.startsWith(SESSIONS_PATH + '/')) {
+    const sid = url.pathname.slice(SESSIONS_PATH.length + 1);
+    // Reject non-UUID path segments as 404 (not 405): from the client's view
+    // they're asking about a session that doesn't exist, not the wrong verb.
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sid)) {
+      sendJson(res, 404, { error: 'session not found' });
+      return;
+    }
+    if (req.method === 'DELETE') {
+      if (!sessions.list().some((s) => s.id === sid)) {
+        sendJson(res, 404, { error: 'session not found' });
+        return;
+      }
+      // `remove` kills the PTY; the existing `onExit` callback on the WS
+      // connection immediately forwards a binary `{type:'exit'}` control
+      // frame to any attached client and closes the socket — so killing a
+      // session that's currently in use cleanly drops the user out at their
+      // terminal.
+      sessions.remove(sid);
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    // Both verbs are supported: the mobile app uses PUT, the desktop app
+    // uses PATCH. Same handler either way.
+    if (req.method === 'PUT' || req.method === 'PATCH') {
+      void handleSessionRename(req, res, sessions, sid);
+      return;
+    }
     sendJson(res, 405, { error: 'method not allowed' });
     return;
   }
-  if (url.pathname === HEALTH_PATH) {
-    // GET-only. The top-of-function method guard historically allowed any
-    // verb past auth as long as it was GET/DELETE/PATCH; the request landed
-    // here with no method check and silently returned the health body. With
-    // `POST` now in that global allow-list (for `/api/fs/mkdir`), a tight
-    // 405 here closes the same leak for every non-GET verb.
-    if (req.method !== 'GET') {
-      sendJson(res, 405, { error: 'method not allowed' });
+
+  // ── GET routes ──────────────────────────────────────────────────
+  if (req.method === 'GET') {
+    if (url.pathname === HEALTH_PATH) {
+      const body: HealthResponse = {
+        version: SHARED_PACKAGE_VERSION,
+        uptimeMs: Math.round(process.uptime() * 1000),
+        tailscaleIp: opts.tailscaleIp,
+        port: actualPort,
+      };
+      sendJson(res, 200, body);
       return;
     }
-    // process.uptime() is monotonic; Date.now() can jump on NTP corrections.
-    // actualPort (not opts.port) so a smoke test using port=0 reports the
-    // OS-assigned ephemeral value.
-    const body: HealthResponse = {
-      version: SHARED_PACKAGE_VERSION,
-      uptimeMs: Math.round(process.uptime() * 1000),
-      tailscaleIp: opts.tailscaleIp,
+    if (url.pathname === SESSIONS_PATH) {
+      sendJson(res, 200, { sessions: sessions.list() });
+      return;
+    }
+    if (url.pathname === FS_PATH) {
+      void handleFs(res, url, settings);
+      return;
+    }
+    if (url.pathname === SETTINGS_PATH) {
+      const body: SettingsResponse = {
+        port: actualPort,
+        bind: settings.bind,
+        name: settings.name,
+        fsRoot: settings.fsRoot,
+        tailscaleIp: opts.tailscaleIp,
+      };
+      sendJson(res, 200, body);
+      return;
+    }
+    if (url.pathname === TOOLS_PATH) {
+      sendJson(res, 200, { tools: listTools() });
+      return;
+    }
+    sendJson(res, 404, { error: 'not found' });
+    return;
+  }
+
+  // ── POST routes ─────────────────────────────────────────────────
+  if (req.method === 'POST') {
+    if (url.pathname === FS_MKDIR_PATH) {
+      void handleFsMkdir(req, res, settings);
+      return;
+    }
+    if (url.pathname === PUSH_REGISTER_PATH || url.pathname === PUSH_UNREGISTER_PATH) {
+      void handlePushToken(req, res, push, url.pathname === PUSH_REGISTER_PATH);
+      return;
+    }
+  }
+
+  // ── PUT /api/settings ───────────────────────────────────────────
+  if (req.method === 'PUT' && url.pathname === SETTINGS_PATH) {
+    void handleSettingsUpdate(req, res, settings, opts, actualPort);
+    return;
+  }
+
+  sendJson(res, 405, { error: 'method not allowed' });
+}
+
+// ── PUT /api/settings ────────────────────────────────────────────────────
+
+/** Max request body size for PUT requests (64 KB). */
+const BODY_MAX = 64 * 1024;
+
+/** Read JSON body from an incoming request, bounded. */
+async function readJsonBody(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<Record<string, unknown> | null> {
+  let body = '';
+  let size = 0;
+  try {
+    body = await new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > BODY_MAX) {
+          req.destroy();
+          reject(new Error('body too large'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      req.on('error', reject);
+    });
+  } catch {
+    sendJson(res, 413, { error: 'request body too large or unreadable' });
+    return null;
+  }
+  try {
+    return JSON.parse(body) as Record<string, unknown>;
+  } catch {
+    sendJson(res, 400, { error: 'invalid JSON' });
+    return null;
+  }
+}
+
+/**
+ * `PUT`/`PATCH` `/api/sessions/:id` — rename a session. Body: `{ name: string }`
+ * (1–100 chars). Responds with the updated session snapshot.
+ */
+async function handleSessionRename(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessions: SessionManager,
+  sid: string,
+): Promise<void> {
+  const parsed = await readJsonBody(req, res);
+  if (!parsed) return;
+  const result = SessionUpdateSchema.safeParse(parsed);
+  if (!result.success) {
+    sendJson(res, 400, { error: 'invalid body', issues: result.error.issues });
+    return;
+  }
+  if (!sessions.rename(sid, result.data.name)) {
+    sendJson(res, 404, { error: 'session not found' });
+    return;
+  }
+  const session = sessions.list().find((s) => s.id === sid);
+  sendJson(res, 200, { session });
+}
+
+async function handleSettingsUpdate(
+  req: IncomingMessage,
+  res: ServerResponse,
+  settings: DaemonSettings,
+  opts: ServerOptions,
+  actualPort: number,
+): Promise<void> {
+  const parsed = await readJsonBody(req, res);
+  if (!parsed) return;
+
+  const result = SettingsUpdateSchema.safeParse(parsed);
+  if (!result.success) {
+    sendJson(res, 400, { error: 'invalid settings', issues: result.error.issues });
+    return;
+  }
+
+  const update = result.data;
+  const restartReasons: string[] = [];
+
+  if (update.name !== undefined) {
+    settings.name = update.name;
+  }
+  if (update.fsRoot !== undefined) {
+    settings.fsRoot = path.resolve(update.fsRoot);
+  }
+  if (update.port !== undefined) {
+    settings.port = update.port;
+    restartReasons.push('port');
+  }
+  if (update.bind !== undefined) {
+    settings.bind = update.bind;
+    restartReasons.push('bind');
+  }
+
+  const response: SettingsUpdateResponse = {
+    settings: {
       port: actualPort,
-    };
-    sendJson(res, 200, body);
-    return;
-  }
-  if (url.pathname === TOOLS_PATH) {
-    if (req.method !== 'GET') {
-      sendJson(res, 405, { error: 'method not allowed' });
-      return;
-    }
-    const body: ToolsResponse = { tools: listTools() };
-    sendJson(res, 200, body);
-    return;
-  }
-  if (url.pathname === PUSH_REGISTER_PATH || url.pathname === PUSH_UNREGISTER_PATH) {
-    if (req.method !== 'POST') {
-      sendJson(res, 405, { error: 'method not allowed' });
-      return;
-    }
-    void handlePushToken(req, res, push, url.pathname === PUSH_REGISTER_PATH);
-    return;
-  }
-  if (url.pathname === SESSIONS_PATH) {
-    if (req.method !== 'GET') {
-      sendJson(res, 405, { error: 'method not allowed' });
-      return;
-    }
-    sendJson(res, 200, { sessions: sessions.list() });
-    return;
-  }
-  if (
-    (req.method === 'DELETE' || req.method === 'PATCH') &&
-    url.pathname.startsWith(SESSIONS_PATH + '/')
-  ) {
-    const id = url.pathname.slice(SESSIONS_PATH.length + 1);
-    // Reject non-UUID path segments as 404 (not 405): from the client's view
-    // they're asking about a session that doesn't exist, not the wrong verb.
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-      sendJson(res, 404, { error: 'session not found' });
-      return;
-    }
-    const exists = sessions.list().some((s) => s.id === id);
-    if (!exists) {
-      sendJson(res, 404, { error: 'session not found' });
-      return;
-    }
-    if (req.method === 'PATCH') {
-      void handleSessionPatch(req, res, sessions, id);
-      return;
-    }
-    // `remove` kills the PTY; the existing `onExit` callback on the WS
-    // connection immediately forwards a binary `{type:'exit'}` control
-    // frame to any attached client and closes the socket — so killing a
-    // session that's currently in use cleanly drops the user out at their
-    // terminal.
-    sessions.remove(id);
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-  if (url.pathname === FS_PATH) {
-    if (req.method !== 'GET') {
-      sendJson(res, 405, { error: 'method not allowed' });
-      return;
-    }
-    void handleFs(res, url);
-    return;
-  }
-  if (url.pathname === FS_MKDIR_PATH) {
-    if (req.method !== 'POST') {
-      sendJson(res, 405, { error: 'method not allowed' });
-      return;
-    }
-    void handleFsMkdir(req, res);
-    return;
-  }
-  sendJson(res, 404, { error: 'not found' });
+      bind: settings.bind,
+      name: settings.name,
+      fsRoot: settings.fsRoot,
+      tailscaleIp: opts.tailscaleIp,
+    },
+    needsRestart: restartReasons.length > 0,
+    restartReasons,
+  };
+  sendJson(res, 200, response);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -594,6 +680,7 @@ function handleUpgrade(
   opts: ServerOptions,
   actualPort: number,
   sessions: SessionManager,
+  settings: DaemonSettings,
 ): void {
   debugLog(req, 'WS-upgrade');
   const url = new URL(req.url ?? '/', `http://${opts.bind}:${actualPort}`);
@@ -635,7 +722,7 @@ function handleUpgrade(
   // A new session (or a resume whose session is gone): fall back to the
   // daemon's own root rather than making the client guess a path that exists
   // on this OS.
-  const cwd = hello.cwd ?? fsRoot();
+  const cwd = hello.cwd ?? resolveFsRoot(settings);
   try {
     const stat = fs.statSync(cwd);
     if (!stat.isDirectory()) throw new Error('not a directory');

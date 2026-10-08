@@ -33,6 +33,14 @@ export interface Launcher {
    * hidden just because `$SHELL` points somewhere a PATH scan won't find.
    */
   alwaysAvailable?: boolean;
+  /**
+   * POSIX shell command that installs the tool. When present, the tool is
+   * reported as `installable` in `GET /api/tools`, and a `/ws/pty` handshake
+   * carrying `install=1` spawns this command in the PTY (then execs the tool
+   * for first-run setup) instead of the tool itself. Not supported on
+   * Windows.
+   */
+  installCommand?: string;
   /** Spawn a PTY process for this tool. */
   spawn(ctx: LauncherContext, hello: PtyHelloQuery): IPty;
 }
@@ -140,15 +148,6 @@ const shellLauncher: Launcher = {
   },
 };
 
-const claudeLauncher: Launcher = {
-  id: 'claude',
-  label: 'Claude Code',
-  bin: 'claude',
-  spawn(ctx) {
-    return spawnTool('claude', [], ctx, 'Claude Code');
-  },
-};
-
 const ollamaLauncher: Launcher = {
   id: 'ollama',
   label: 'Ollama',
@@ -161,17 +160,80 @@ const ollamaLauncher: Launcher = {
   },
 };
 
-const freebuffLauncher: Launcher = {
+/**
+ * Shared shape for AI coding agents (Claude Code, Freebuff, Codex): a single
+ * binary launched with no args, plus an install command the daemon can run on
+ * the user's behalf.
+ *
+ * When the handshake carries `install=1`, the PTY runs the install command
+ * and — on success — execs the agent so its first-run setup (login, config)
+ * happens right there in the interactive session. On failure it drops into a
+ * login shell so the user can investigate from the phone. Runs under
+ * `bash -l` (not `$SHELL`, whose syntax may differ — fish) so the user's
+ * profile PATH (nvm, npm globals) is loaded for both install and exec.
+ */
+function agentLauncher(opts: {
+  id: string;
+  label: string;
+  bin: string;
+  installCommand: string;
+}): Launcher {
+  return {
+    id: opts.id,
+    label: opts.label,
+    bin: opts.bin,
+    installCommand: opts.installCommand,
+    spawn(ctx, hello) {
+      if (hello.install === '1' && !isWindows) {
+        const script = [
+          `echo "[pilot] Installing ${opts.label}..."`,
+          `echo "[pilot] Running: ${opts.installCommand}"`,
+          `if ${opts.installCommand}; then`,
+          `  echo "[pilot] ${opts.label} installed — starting it for first-run setup..."`,
+          `  exec ${opts.bin}`,
+          `else`,
+          `  echo "[pilot] ${opts.label} install failed — see the output above. Dropping into a shell."`,
+          `  exec bash -l`,
+          `fi`,
+        ].join('\n');
+        return ptySpawn('bash', ['-lc', script], {
+          name: 'xterm-256color',
+          cols: ctx.cols,
+          rows: ctx.rows,
+          cwd: ctx.cwd,
+          env: ctx.env ?? process.env,
+        });
+      }
+      return spawnTool(opts.bin, [], ctx, opts.label);
+    },
+  };
+}
+
+const claudeCodeLauncher = agentLauncher({
+  id: 'claude-code',
+  label: 'Claude Code',
+  bin: 'claude',
+  installCommand: 'npm install -g @anthropic-ai/claude-code',
+});
+
+const freebuffLauncher = agentLauncher({
   id: 'freebuff',
   label: 'Freebuff',
   bin: 'freebuff',
-  spawn(ctx) {
-    return spawnTool('freebuff', [], ctx, 'Freebuff');
-  },
-};
+  installCommand: 'npm install -g freebuff',
+});
+
+const codexLauncher = agentLauncher({
+  id: 'codex',
+  label: 'Codex',
+  bin: 'codex',
+  installCommand: 'npm install -g @openai/codex',
+});
 
 const launchers: ReadonlyMap<string, Launcher> = new Map(
-  [shellLauncher, claudeLauncher, ollamaLauncher, freebuffLauncher].map((l) => [l.id, l]),
+  [shellLauncher, ollamaLauncher, claudeCodeLauncher, freebuffLauncher, codexLauncher].map(
+    (l) => [l.id, l],
+  ),
 );
 
 export function getLauncher(id: string): Launcher | undefined {
@@ -192,5 +254,6 @@ export function listTools(): ToolInfo[] {
     id: l.id,
     label: l.label,
     available: l.alwaysAvailable === true || resolveOnPath(l.bin) !== null,
+    installable: Boolean(l.installCommand) && !isWindows,
   }));
 }

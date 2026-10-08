@@ -15,17 +15,87 @@ This is a **pnpm** monorepo with three packages:
 | [`packages/app`](./packages/app)         | `pilot-app` — React Native + Expo, Android-first.                                                                                                                                                                     |
 | [`packages/desktop`](./packages/desktop) | `pilot-desktop` — **Phase 6 scaffold.** Electron app that launches the daemon and shows the pairing QR in a window. Run: `pnpm --filter @pilot/desktop start`. Not yet self-contained (uses system `node`) or signed. |
 
-## Quick start
+## Install
+
+### Automated (Linux, recommended)
+
+For a fresh Linux box — including headless servers, dev VMs, and CI
+runners — use:
 
 ```bash
-pnpm install            # install all workspace deps
-pnpm --filter @pilot/shared build
-pnpm typecheck           # tsc on all packages
-pnpm lint                # eslint (flat config)
-pnpm test                # vitest on @pilot/shared (more added in Phase 1)
+curl -fsSL https://pilot.remarkablenerds.com/install.sh | bash
 ```
 
-Per-package scripts:
+The script installs Node ≥ 20, pnpm, Tailscale, and the system libraries
+Pilot needs; clones the repo into `~/.local/share/pilot`; builds the CLI
+daemon; registers it as a `systemd --user` service (`pilot-cli.service`);
+and starts it. Pair the Pilot app on your phone by scanning the QR
+printed at the end, or by opening `http://localhost:7117/`.
+
+Common overrides (env vars):
+
+| Var                | Default                                    | Effect                                             |
+| ------------------ | ------------------------------------------ | -------------------------------------------------- |
+| `PILOT_HOME`       | `~/.local/share/pilot`                     | Clone target                                       |
+| `PILOT_REPO_URL`   | `https://github.com/jordansoper/Pilot.git` | Fork or pinned URL                                 |
+| `PILOT_PORT`       | `7117`                                     | Daemon listen port                                 |
+| `PILOT_BIND`       | `0.0.0.0`                                  | Bind address (`127.0.0.1` for localhost-only)      |
+| `PILOT_NAME`       | `$(hostname)`                              | Friendly name on the QR                            |
+| `PILOT_NO_START`   | `0`                                        | Don't start the daemon (CI smoke runs)             |
+| `PILOT_NO_SYSTEMD` | `0`                                        | Skip the systemd unit (Docker, WSL, chroot, macOS) |
+
+Full list, plus per-distro behavior (apt/dnf/pacman/zypper/apk, musl
+detection for Alpine, etc.), lives in [`install.sh`](./install.sh). To
+inspect the script before running it:
+
+```bash
+curl -fsSL https://pilot.remarkablenerds.com/install.sh -o /tmp/install.sh
+less -FX /tmp/install.sh
+PILOT_NO_START=1 bash /tmp/install.sh    # dry-ish: install but don't start
+```
+
+### Manual (clone + build)
+
+For contributors, hosts that can't run `curl | bash`, or anyone who wants
+to run the daemon in their own shell without registering a systemd unit:
+
+```bash
+# 1. Clone
+git clone https://github.com/jordansoper/Pilot.git
+cd Pilot
+
+# 2. Install tooling: Node ≥ 20 and pnpm ≥ 9
+#    (See "Requirements" below.)
+
+# 3. Workspace install + topological build
+#    (topological order so apps see @pilot/shared/dist)
+pnpm install --frozen-lockfile
+pnpm -r --topological build
+
+# 4. Run the daemon in the foreground (Ctrl+C to stop)
+node packages/cli/dist/index.js --bind 0.0.0.0 --port 7117
+
+# 5. Pair your phone
+#    Scan the QR printed in the terminal with the Pilot app, or open:
+#    http://localhost:7117/
+```
+
+For an iterative dev loop, swap step 4 for the workspace `dev` scripts:
+
+```bash
+pnpm --filter @pilot/shared build     # one-off; then cached per package
+pnpm --filter @pilot/cli dev          # tsx watch — auto-restarts on save
+pnpm --filter @pilot/app start        # Expo dev server — pair with the app
+```
+
+Both paths produce the same `packages/cli/dist/index.js` artifact; only
+the surrounding niceties (systemd unit, distro detection, Tailscale
+check) differ. After a manual install, `install.sh` will recognize the
+existing clone at `~/.local/share/pilot` and `git pull --ff-only` on
+each subsequent run — so you can switch between manual development and
+the automated installer freely.
+
+### Per-package scripts
 
 ```bash
 pnpm --filter @pilot/cli dev      # CLI in watch mode (tsx)
@@ -61,8 +131,8 @@ picker, folder picker for new sessions, multi-machine, settings/reset, back nav.
 
 - 🔨 **Phase A — AI tool launchers** (freebuff / Claude Code / ollama). _Daemon
   half done:_ `GET /api/tools` reports each launcher with a live
-  installed-or-not flag, and `/ws/pty?tool=` spawns any of them. _Outstanding:_
-  the in-app tool picker, plus a model picker for ollama.
+  installed-or-not flag, and `/ws/pty?tool=` spawns any of them. _Done:_ the in-app tool
+  picker (with install & set up, and a model prompt for ollama).
 - 🔨 Phase B — Terminal UX polish. _Done:_ Termux-style quick-key bar
   (sticky Ctrl/Alt, Esc, Tab, arrows, ^C/^D, Home/End, PgUp/PgDn), and xterm.js
   vendored into the app bundle so the terminal renders with no public internet.

@@ -75,6 +75,7 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
   var SESSION = CFG.session; // stored session id to resume, or empty
   var TOOL = CFG.tool || 'bash';
   var MODEL = CFG.model || '';
+  var INSTALL = !!CFG.install;
 
   if (!HOST || !PORT || !TOKEN) {
     post({ type: 'error', message: 'missing host/port/token' });
@@ -93,6 +94,16 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
   term.open(document.getElementById('term'));
   try { fit.fit(); } catch (_) { /* terminal may not yet be measurable */ }
 
+  // Keyboard input lands in xterm's hidden textarea — make sure the Android
+  // IME treats it as raw text: no autocorrect, auto-capitalize or suggestions.
+  var helper = document.querySelector('.xterm-helper-textarea');
+  if (helper) {
+    helper.setAttribute('autocomplete', 'off');
+    helper.setAttribute('autocorrect', 'off');
+    helper.setAttribute('autocapitalize', 'none');
+    helper.setAttribute('spellcheck', 'false');
+  }
+
   // The shell lives on the daemon and survives disconnects. We reconnect on
   // drop (e.g. returning from the background) and re-attach to the same
   // session by id — the daemon replays the scrollback, so you land back
@@ -110,6 +121,7 @@ const TERMINAL_HTML_TEMPLATE = `<!DOCTYPE html>
     // Omit cwd rather than sending an empty one: the schema rejects a blank
     // value, and with it absent the daemon uses its own root — which beats the
     // app guessing a path that may not exist on that OS.
+    if (INSTALL) u += '&install=1';
     if (MODEL) u += '&model=' + encodeURIComponent(MODEL);
     if (CWD) u += '&cwd=' + encodeURIComponent(CWD);
     if (currentSession) u += '&session=' + encodeURIComponent(currentSession);
@@ -323,6 +335,8 @@ export interface TerminalConfig {
   /** Tool id to launch for a new session; defaults to the shell. */
   tool?: string;
   model?: string;
+  /** Run the tool's install-and-set-up script instead of the tool itself. */
+  install?: boolean;
 }
 
 /**

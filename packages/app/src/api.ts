@@ -108,3 +108,48 @@ export async function apiPost<T>(
     clearTimeout(timeout);
   }
 }
+
+/** Authenticated DELETE. The daemon replies 204 on success. */
+export async function apiDelete<T = { ok: boolean }>(
+  m: PairedMachine,
+  pathAndQuery: string,
+  timeoutMs = 6000,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://${machineHost(m)}:${m.port}${pathAndQuery}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${m.token}` },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
+    if (res.status === 204) return { ok: true } as T;
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** Authenticated PUT with a JSON body. Throws `ApiError` on non-2xx. */
+export async function apiPut<T = { ok: boolean }>(
+  m: PairedMachine,
+  pathAndQuery: string,
+  body: unknown,
+  timeoutMs = 6000,
+): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`http://${machineHost(m)}:${m.port}${pathAndQuery}`, {
+      method: 'PUT',
+      headers: { authorization: `Bearer ${m.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}

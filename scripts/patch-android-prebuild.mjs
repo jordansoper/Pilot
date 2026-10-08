@@ -18,6 +18,7 @@
  * See TROUBLESHOOTING.md §5.
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -82,6 +83,30 @@ if (existsSync(manifestPath)) {
     );
     console.log('[patch-android] AndroidManifest.xml: enabled usesCleartextTraffic');
     changed += 1;
+  }
+}
+
+// 4. local.properties — `expo prebuild --clean` wipes it, and Gradle then
+//    fails with "SDK location not found" unless ANDROID_HOME happens to point
+//    at a *complete* SDK. Recreate it pointing at the first candidate that
+//    actually has platform-tools (a bare licenses/ndk dir doesn't count).
+const localProps = join(androidDir, 'local.properties');
+if (!existsSync(localProps)) {
+  const candidates = [
+    process.env.ANDROID_HOME,
+    process.env.ANDROID_SDK_ROOT,
+    join(homedir(), 'Library', 'Android', 'sdk'), // macOS default
+    join(homedir(), 'Android', 'Sdk'), // Linux default
+  ].filter(Boolean);
+  const sdk = candidates.find((d) => existsSync(join(d, 'platform-tools')));
+  if (sdk) {
+    writeFileSync(localProps, `sdk.dir=${sdk}\n`);
+    console.log(`[patch-android] local.properties: sdk.dir=${sdk}`);
+    changed += 1;
+  } else {
+    console.warn(
+      '[patch-android] no Android SDK with platform-tools found — Gradle may fail with "SDK location not found"',
+    );
   }
 }
 

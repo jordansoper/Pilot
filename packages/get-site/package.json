@@ -1,0 +1,31 @@
+{
+  "name": "@pilot/get-site",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Cloudflare Worker that hosts install.sh at pilot.remarkablenerds.com/ with cache-friendly headers. Mirrors https://github.com/jordansoper/Pilot/blob/main/install.sh. Used for the one-liner `curl -fsSL https://pilot.remarkablenerds.com/install.sh | bash`.",
+  "type": "module",
+  "scripts": {
+    "bundle": "node scripts/bundle-install.mjs",
+    "prebuild": "node scripts/bundle-install.mjs",
+    "pretest": "node scripts/bundle-install.mjs",
+    "pretypecheck": "node scripts/bundle-install.mjs",
+    "predev": "node scripts/bundle-install.mjs",
+    "postinstall": "node scripts/bundle-install.mjs",
+    "build": "wrangler deploy --dry-run --outdir=dist",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src scripts",
+    "test": "vitest run",
+    "clean": "rm -rf dist .wrangler src/install-bundled.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@cloudflare/workers-types": "^4.20240924.0",
+    "@types/node": "^22.7.5",
+    "typescript": "5.6.3",
+    "vitest": "^2.1.3",
+    "wrangler": "^3.91.0"
+  }
+}

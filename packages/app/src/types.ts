@@ -52,8 +52,8 @@ export type Screen =
   | { name: 'addMachine' }
   | { name: 'settings' }
   | { name: 'sessions'; machineId: string }
-  | { name: 'filePicker'; machineId: string }
-  | { name: 'toolPicker'; machineId: string; cwd: string }
+  | { name: 'toolPicker'; machineId: string }
+  | { name: 'filePicker'; machineId: string; tool: string; model?: string }
   | {
       name: 'terminal';
       machineId: string;
@@ -61,4 +61,6 @@ export type Screen =
       cwd?: string;
       tool?: string;
       model?: string;
+      /** Install-and-set-up mode: the daemon installs `tool` before running it. */
+      install?: boolean;
     };

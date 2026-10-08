@@ -79,8 +79,8 @@ describe('listTools', () => {
   it('lists the AI tools even when they are not installed, so the app can grey them out', () => {
     vi.stubEnv('PATH', '');
     const ids = listTools().map((t) => t.id);
-    expect(ids).toEqual(expect.arrayContaining(['claude', 'ollama', 'freebuff']));
-    expect(listTools().find((t) => t.id === 'claude')!.available).toBe(false);
+    expect(ids).toEqual(expect.arrayContaining(['claude-code', 'ollama', 'freebuff']));
+    expect(listTools().find((t) => t.id === 'claude-code')!.available).toBe(false);
   });
 
   it('reports a tool as available once it appears on PATH', () => {
@@ -88,7 +88,7 @@ describe('listTools', () => {
     dirs.push(dir);
     vi.stubEnv('PATH', dir);
     if (isWindows) vi.stubEnv('PATHEXT', '.COM;.EXE;.BAT;.CMD');
-    expect(listTools().find((t) => t.id === 'claude')!.available).toBe(true);
+    expect(listTools().find((t) => t.id === 'claude-code')!.available).toBe(true);
   });
 
   it('every id is registered and spawnable via getLauncher', () => {

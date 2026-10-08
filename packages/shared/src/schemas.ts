@@ -159,6 +159,12 @@ export const ToolInfoSchema = z.object({
   label: z.string().min(1).max(100),
   /** Whether `which <bin>` succeeded for this tool on the host. */
   available: z.boolean(),
+  /**
+   * Whether the daemon can install this tool on the host (see the `install`
+   * flag on the PTY handshake). Optional for back-compat with older daemons
+   * that don't report it.
+   */
+  installable: z.boolean().optional(),
 });
 
 /** Response payload of `GET /api/tools`. */
@@ -178,13 +184,8 @@ export const SessionInfoSchema = z.object({
   createdMs: z.number().int().nonnegative(),
   /** Whether a client is currently attached. */
   attached: z.boolean(),
-  /** User-assigned display name (set via PATCH /api/sessions/:id). */
+  /** User-assigned display name, set via `PUT /api/sessions/:id`. */
   name: z.string().min(1).max(100).optional(),
-});
-
-/** Request body of `PATCH /api/sessions/:id` — rename a session. */
-export const SessionPatchSchema = z.object({
-  name: z.string().min(1).max(100),
 });
 
 /** Body of `POST /api/push/register` and `/api/push/unregister`. */
@@ -213,6 +214,47 @@ export const HealthResponseSchema = z.object({
   port: z.number().int().positive(),
 });
 
+/** Response payload of `GET /api/settings`. */
+export const SettingsResponseSchema = z.object({
+  /** Current listen port. */
+  port: z.number().int().positive().max(65535),
+  /** Current bind address. */
+  bind: z.string().min(1),
+  /** Friendly machine name shown in the QR. */
+  name: z.string().min(1).max(100),
+  /** Folder-browser allowlist root (absolute path). */
+  fsRoot: z.string().min(1),
+  /** Resolved Tailscale IP, or null if not on a tailnet (read-only). */
+  tailscaleIp: z.string().nullable(),
+});
+
+/** Request body for `PUT /api/settings` — all fields optional. */
+export const SettingsUpdateSchema = z.object({
+  /** New listen port (requires daemon restart to take effect). */
+  port: z.number().int().positive().max(65535).optional(),
+  /** New bind address (requires daemon restart to take effect). */
+  bind: z.string().min(1).optional(),
+  /** New machine name (takes effect immediately). */
+  name: z.string().min(1).max(100).optional(),
+  /** New folder-browser allowlist root (takes effect immediately). */
+  fsRoot: z.string().min(1).optional(),
+});
+
+/** Response payload of `PUT /api/settings`. */
+export const SettingsUpdateResponseSchema = z.object({
+  /** Updated settings after applying the patch. */
+  settings: SettingsResponseSchema,
+  /** Whether the daemon needs to be restarted for some changes to apply. */
+  needsRestart: z.boolean(),
+  /** Human-readable list of fields that triggered the restart requirement. */
+  restartReasons: z.array(z.string()),
+});
+
+/** Request body for `PUT /api/sessions/:id` — rename a session. */
+export const SessionUpdateSchema = z.object({
+  name: z.string().min(1).max(100),
+});
+
 /**
  * Query parameters for `WS /ws/pty` handshake. Server-side this is parsed
  * from the URL; client-side the app builds it from user choices.
@@ -237,6 +279,14 @@ export const PtyHelloQuerySchema = z.object({
     .regex(/^[a-z0-9-]+$/, 'tool id must match /^[a-z0-9-]+$/'),
   /** Optional model name (used by `ollama run <model>`). */
   model: z.string().min(1).max(100).optional(),
+  /**
+   * When `'1'`, spawn the tool's install-and-set-up script instead of the
+   * tool itself: the daemon runs the launcher's install command in the PTY
+   * and, on success, execs the tool so the user completes any first-run
+   * setup (login, config) interactively. Only honoured for launchers that
+   * advertise `installable` in `GET /api/tools`. Ignored on re-attach.
+   */
+  install: z.literal('1').optional(),
   /**
    * Existing session id to re-attach to (kept alive on the daemon across
    * disconnects). Omitted/unknown → a fresh session is created and its id is

@@ -12,8 +12,8 @@ import { MachinesScreen } from './src/screens/MachinesScreen.js';
 import { AddMachineScreen } from './src/screens/AddMachineScreen.js';
 import { SettingsScreen } from './src/screens/SettingsScreen.js';
 import { SessionsScreen } from './src/screens/SessionsScreen.js';
-import { ToolPickerScreen } from './src/screens/ToolPickerScreen.js';
 import { FilePickerScreen } from './src/screens/FilePickerScreen.js';
+import { ToolPickerScreen } from './src/screens/ToolPickerScreen.js';
 import { TerminalScreen } from './src/screens/TerminalScreen.js';
 
 import { syncPushRegistrations } from './src/notifications.js';
@@ -37,6 +37,11 @@ export default function App() {
   const back = useCallback(() => {
     setStack((s) => (s.length > 1 ? s.slice(0, -1) : s));
   }, []);
+  // Replace the top screen (e.g. folder picker → terminal), so Back skips it.
+  const replace = useCallback(
+    (screen: Screen) => setStack((s) => [...s.slice(0, -1), screen]),
+    [],
+  );
   const goHome = useCallback(() => setStack([HOME]), []);
 
   // Re-announce this phone to every paired machine on launch (idempotent).
@@ -79,34 +84,42 @@ export default function App() {
           onOpenSession={(sessionId, cwd) =>
             push({ name: 'terminal', machineId: current.machineId, sessionId, cwd })
           }
-          onNewSession={() => push({ name: 'filePicker', machineId: current.machineId })}
+          onNewSession={() => push({ name: 'toolPicker', machineId: current.machineId })}
+        />
+      )}
+      {current.name === 'toolPicker' && (
+        <ToolPickerScreen
+          machineId={current.machineId}
+          onBack={back}
+          onPick={(tool, model) =>
+            push({
+              name: 'filePicker',
+              machineId: current.machineId,
+              tool,
+              ...(model ? { model } : {}),
+            })
+          }
+          // Install & set up: no folder to pick — go straight to a terminal
+          // where the daemon runs the install, then the tool's first-run
+          // setup. `cwd` comes from the picker (the daemon's fsRoot, i.e.
+          // usually the home dir).
+          onInstall={(tool, cwd) =>
+            replace({ name: 'terminal', machineId: current.machineId, tool, cwd, install: true })
+          }
         />
       )}
       {current.name === 'filePicker' && (
         <FilePickerScreen
           machineId={current.machineId}
           onBack={back}
-          onPick={(cwd) => push({ name: 'toolPicker', machineId: current.machineId, cwd })}
-        />
-      )}
-      {current.name === 'toolPicker' && (
-        <ToolPickerScreen
-          machineId={current.machineId}
-          cwd={current.cwd}
-          onBack={back}
-          onPick={(tool, model) =>
-            // Drop both pickers so Back from the terminal lands on the
-            // sessions list.
-            setStack((s) => [
-              ...s.slice(0, -2),
-              {
-                name: 'terminal',
-                machineId: current.machineId,
-                cwd: current.cwd,
-                tool,
-                ...(model ? { model } : {}),
-              },
-            ])
+          onPick={(cwd) =>
+            replace({
+              name: 'terminal',
+              machineId: current.machineId,
+              cwd,
+              tool: current.tool,
+              ...(current.model ? { model: current.model } : {}),
+            })
           }
         />
       )}
@@ -117,6 +130,7 @@ export default function App() {
           cwd={current.cwd}
           tool={current.tool}
           model={current.model}
+          install={current.install}
           onBack={back}
         />
       )}

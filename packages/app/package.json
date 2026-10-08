@@ -40,6 +40,7 @@
     "@types/react": "~18.2.79",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
+    "eas-cli": "^20.5.1",
     "typescript": "5.6.3",
     "vitest": "^2.1.3"
   }

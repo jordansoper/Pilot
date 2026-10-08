@@ -38,6 +38,39 @@ function resourcesDirFor(context) {
   return path.join(appOutDir, 'resources');
 }
 
+
+// node-pty ships a `spawn-helper` binary that macOS/Linux fork-exec to launch
+// the shell. asar unpacking and zip/7z compression do not reliably preserve
+// its +x bit, so re-apply it (the same class of bug fix-node-pty-perms.mjs
+// works around for a plain `pnpm install`).
+function fixSpawnHelperPerms(dir, depth = 0) {
+  if (depth > 12) return 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let fixed = 0;
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      fixed += fixSpawnHelperPerms(full, depth + 1);
+    } else if (entry.name === 'spawn-helper') {
+      try {
+        const mode = fs.statSync(full).mode;
+        if ((mode & 0o111) === 0) {
+          fs.chmodSync(full, mode | 0o755);
+          fixed += 1;
+        }
+      } catch {
+        /* ignore unreadable files */
+      }
+    }
+  }
+  return fixed;
+}
+
 exports.default = async function afterPack(context) {
   const isWin = context.electronPlatformName === 'win32';
   const resources = resourcesDirFor(context);
@@ -106,5 +139,9 @@ exports.default = async function afterPack(context) {
     } else {
       fs.symlinkSync(path.relative(dir, realNm), nm, 'dir');
     }
+  }
+  if (!isWin) {
+    const fixed = fixSpawnHelperPerms(resources);
+    if (fixed > 0) console.log(`[after-pack] made ${fixed} spawn-helper binary(ies) executable`);
   }
 };

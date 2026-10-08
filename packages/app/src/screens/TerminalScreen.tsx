@@ -40,6 +40,8 @@ export interface TerminalScreenProps {
   tool?: string | undefined;
   /** Model for tools that take one (ollama). */
   model?: string | undefined;
+  /** Install-and-set-up mode: the daemon installs `tool`, then runs it. */
+  install?: boolean | undefined;
   onBack: () => void;
 }
 
@@ -49,6 +51,7 @@ export function TerminalScreen({
   cwd,
   tool,
   model,
+  install = false,
   onBack,
 }: TerminalScreenProps) {
   const [machine, setMachine] = useState<PairedMachine | null>(null);
@@ -160,6 +163,7 @@ export function TerminalScreen({
     session: sessionId ?? '',
     tool: tool ?? 'bash',
     model: model ?? '',
+    install,
   });
 
   return (

@@ -1,0 +1,41 @@
+{
+  // Cloudflare Worker config for pilot.remarkablenerds.com.
+  //
+  // `custom_domain: true` on a route requires the `remarkablenerds.com` zone to exist
+  // in the Cloudflare account this worker is deployed to. Cloudflare will
+  // automatically provision the DNS record for `pilot.remarkablenerds.com`.
+  //
+  // Set secrets with:  wrangler secret put CLOUDFLARE_DEPLOY_TOKEN
+  // (only needed if upgrading from anon access to auth-gated routes in the
+  //  future; today the install script has no such gate.)
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pilot-get",
+  "main": "src/worker.ts",
+
+  // Pin to a stable compatibility date — roughly 10 months prior to today
+  // (2026-07) so Cloudflare's runtime is well-understood and stable.
+  // Bump annually or when picking up new runtime APIs.
+  "compatibility_date": "2025-09-01",
+
+  "observability": {
+    "enabled": true
+  },
+
+  // No explicit placement — Cloudflare's smart placement is the 2025+
+  // default. Static-content worker benefits automatically without an opt-in.
+
+  "vars": {
+    // Override per-environment with `wrangler deploy --var GITHUB_REPO=foo/bar`
+    // or in a separate wrangler.{env}.jsonc.
+    "GITHUB_REPO": "jordansoper/Pilot",
+    "GITHUB_REF": "main",
+    "INSTALL_SH_PATH": "install.sh"
+  },
+
+  "routes": [
+    {
+      "pattern": "pilot.remarkablenerds.com",
+      "custom_domain": true
+    }
+  ]
+}

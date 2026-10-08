@@ -1,0 +1,13 @@
+{
+  "expo": {
+    "name": "pilot",
+    "slug": "pilot",
+    "version": "0.0.0",
+    "description": "Remote CLI connector — pair a phone with your dev machines to launch AI CLIs from anywhere. See PROJECT_PLAN.md.",
+    "sdkVersion": "51.0.0",
+    "platforms": [
+      "ios",
+      "android"
+    ]
+  }
+}
